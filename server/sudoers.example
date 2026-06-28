@@ -1,0 +1,4 @@
+# Example only. Review carefully before adapting.
+# Keep the policy path fixed and root-owned. Do not allow caller-selected
+# policy files in privileged sudoers rules.
+deploy-user ALL=(root) NOPASSWD: /usr/local/bin/ops-wrapper --policy /etc/ops-wrapper/policy.json version, /usr/local/bin/ops-wrapper --policy /etc/ops-wrapper/policy.json host-observe, /usr/local/bin/ops-wrapper --policy /etc/ops-wrapper/policy.json runtime-baseline

@@ -1,0 +1,53 @@
+{
+  "rollout_order": [
+    "prod-us",
+    "prod-eu"
+  ],
+  "hosts": {
+    "staging": {
+      "ssh_alias": "example-staging",
+      "region": "Staging",
+      "remote_user": "deploy-user",
+      "app_path": "mock-app",
+      "service": "example-app",
+      "server_wrapper": "/usr/local/bin/ops-wrapper",
+      "policy_path": "server/policy.example.json",
+      "config_files": {
+        "config/app.env": {
+          "allowed_keys": [
+            "APP_LOG_LEVEL",
+            "FEATURE_FLAG_X",
+            "PAYMENTS_TIMEOUT_MS"
+          ]
+        }
+      },
+      "forbid_full_copy": [
+        "config/app.env",
+        ".env"
+      ]
+    },
+    "prod-us": {
+      "ssh_alias": "example-prod-us",
+      "region": "US",
+      "remote_user": "deploy-user",
+      "app_path": "mock-app",
+      "service": "example-app",
+      "server_wrapper": "/usr/local/bin/ops-wrapper",
+      "policy_path": "server/policy.example.json",
+      "config_files": {
+        "config/app.env": {
+          "allowed_keys": [
+            "APP_LOG_LEVEL",
+            "FEATURE_FLAG_X",
+            "PAYMENTS_TIMEOUT_MS"
+          ]
+        }
+      },
+      "forbid_full_copy": [
+        "config/app.env",
+        ".env"
+      ]
+    }
+  }
+}
+

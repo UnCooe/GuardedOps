@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "guardedops"
+version = "0.1.0"
+description = "Guarded operational workflows for planned, authorized, routed, and reviewed changes."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "GuardedOps contributors" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: System :: Systems Administration",
+]
+dependencies = []
+
+[project.scripts]
+opsctl = "guarded_ops.cli.opsctl:main"
+routectl = "guarded_ops.cli.routectl:main"
+ops-review = "guarded_ops.cli.ops_review:main"
+ops-guard-hook = "guarded_ops.cli.ops_guard_hook:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

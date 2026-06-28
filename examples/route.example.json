@@ -1,0 +1,26 @@
+{
+  "mode": "synthetic",
+  "git_host": "git.example.com",
+  "sources": {
+    "default": {
+      "type": "mock",
+      "regions": [
+        "us",
+        "eu",
+        "ap"
+      ]
+    }
+  },
+  "targets": {
+    "example-staging": {
+      "host": "203.0.113.10",
+      "port": 22,
+      "region": "us"
+    },
+    "example-prod-us": {
+      "host": "203.0.113.20",
+      "port": 22,
+      "region": "us"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+{"command": "opsctl observe --host staging"}
+{"command": "ssh example-prod-us -- hostname"}
+{"command": "opsctl plan-config --host staging --file config/app.env --set APP_LOG_LEVEL=debug"}
+

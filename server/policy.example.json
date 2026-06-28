@@ -1,0 +1,41 @@
+{
+  "policy_version": "example-v1",
+  "service": "example-app",
+  "app_path": "examples/mock-app",
+  "version_file": "server/ops-wrapper.version.json",
+  "audit_log": ".guarded_ops/audit.jsonl",
+  "actions": {
+    "host-observe": {
+      "enabled": true
+    },
+    "runtime-baseline": {
+      "enabled": true
+    },
+    "config-patch": {
+      "enabled": true,
+      "allowed_files": {
+        "config/app.env": {
+          "allowed_keys": [
+            "APP_LOG_LEVEL",
+            "FEATURE_FLAG_X",
+            "PAYMENTS_TIMEOUT_MS"
+          ]
+        }
+      }
+    },
+    "log-query": {
+      "enabled": true,
+      "roots": [
+        "examples/mock-app/logs"
+      ],
+      "max_lines": 200
+    },
+    "safe-git": {
+      "enabled": true,
+      "allowed_ops": [
+        "status",
+        "rev-parse"
+      ]
+    }
+  }
+}
