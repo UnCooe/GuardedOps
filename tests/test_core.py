@@ -445,8 +445,6 @@ class OpsctlTests(unittest.TestCase):
                 "demo-ssh",
                 "--wrapper-source",
                 "server/ops-wrapper",
-                "--policy-source",
-                "examples/demo-remote/policy.json",
             ],
             cwd=self.tmp,
         )
@@ -460,6 +458,8 @@ class OpsctlTests(unittest.TestCase):
         self.assertEqual(generated["host"], "demo-ssh")
         self.assertEqual(generated["app_path"], "/opt/guardedops-demo/app")
         self.assertEqual(generated["service"], "guardedops_demo")
+        self.assertEqual(generated["audit_log"], "/var/log/guardedops-demo/audit.jsonl")
+        self.assertEqual(generated["backup_dir"], "/var/backups/guardedops-demo")
         self.assertEqual(generated["actions"]["log-query"]["roots"], ["/opt/guardedops-demo/app/logs"])
 
 
@@ -576,6 +576,8 @@ class WrapperRouteReviewHookTests(unittest.TestCase):
             (app / "config/app.env").write_text("API_TOKEN=oldsecret\n", encoding="utf-8")
             policy = json.loads((ROOT / "examples/demo-remote/policy.json").read_text(encoding="utf-8"))
             policy["app_path"] = str(app)
+            policy["audit_log"] = str(tmp_path / "audit.jsonl")
+            policy["backup_dir"] = str(tmp_path / "backups")
             policy["actions"]["config-patch"]["allowed_files"]["config/app.env"]["allowed_keys"].append("API_TOKEN")
             policy_path = tmp_path / "policy.json"
             policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")

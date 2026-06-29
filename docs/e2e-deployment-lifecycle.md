@@ -58,9 +58,10 @@ backup: /var/backups/guardedops-demo
 service: guardedops_demo
 ```
 
-Do not modify existing application paths or services while validating the
-GuardedOps public lifecycle. A sandbox validation must not touch any
-organization-owned application path or restart any non-demo service.
+Do not modify, read, probe, or restart existing application paths or services
+while validating the GuardedOps public lifecycle. Operators should verify only
+the allowlisted demo paths above; checking organization-owned paths or service
+states is outside the public validation contract.
 
 ## Acceptance Commands
 

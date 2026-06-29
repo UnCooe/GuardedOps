@@ -5,8 +5,8 @@
   "service_adapter": "mock",
   "app_path": "examples/demo-remote/app",
   "version_file": "server/ops-wrapper.version.json",
-  "audit_log": ".guarded_ops/demo-audit.jsonl",
-  "backup_dir": ".guarded_ops/demo-backups",
+  "audit_log": "/var/log/guardedops-demo/audit.jsonl",
+  "backup_dir": "/var/backups/guardedops-demo",
   "actions": {
     "host-observe": {
       "enabled": true

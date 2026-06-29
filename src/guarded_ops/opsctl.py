@@ -428,14 +428,14 @@ def cmd_install_wrapper(args: argparse.Namespace) -> int:
     if not runtime_source.exists():
         candidate = Path(args.wrapper_source).resolve().parents[1] / "src" / "guarded_ops"
         runtime_source = candidate if candidate.exists() else Path(__file__).resolve().parent
-    policy_source = Path(args.policy_source)
+    policy_source = Path(host.get("policy_source") or args.policy_source)
     policy_data = json.loads(policy_source.read_text(encoding="utf-8"))
     policy_data["host"] = args.host
     policy_data["app_path"] = host["app_path"]
     policy_data["service"] = host["service"]
-    if "audit_log" not in policy_data or host.get("transport") == "ssh":
+    if "audit_log" not in policy_data:
         policy_data["audit_log"] = str(Path(host["policy_path"]).parent / "audit.jsonl")
-    if "backup_dir" not in policy_data or host.get("transport") == "ssh":
+    if "backup_dir" not in policy_data:
         policy_data["backup_dir"] = str(Path(host["policy_path"]).parent / "backups")
     log_action = (policy_data.get("actions") or {}).get("log-query")
     if isinstance(log_action, dict) and host.get("transport") == "ssh":

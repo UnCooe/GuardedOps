@@ -45,6 +45,7 @@
       "service": "guardedops_demo",
       "server_wrapper": "/usr/local/bin/ops-wrapper-demo",
       "policy_path": "/etc/guardedops-demo/policy.json",
+      "policy_source": "examples/demo-remote/policy.json",
       "config_files": {
         "config/app.env": {
           "allowed_keys": [
