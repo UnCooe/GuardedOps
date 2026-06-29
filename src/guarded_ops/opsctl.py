@@ -170,6 +170,13 @@ def batch_args(payload: dict[str, Any]) -> list[str]:
     return rendered
 
 
+def redacted_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "sets": [{"path": item["path"], "value": redact_value(item["path"], item["value"])} for item in payload["sets"]],
+    }
+
+
 def common_host(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
     fleet = load_fleet(args.fleet)
     host = host_config(fleet, args.host)
@@ -396,8 +403,9 @@ def cmd_plan_config_batch(args: argparse.Namespace) -> int:
     payload = batch_change_payload(args.host, args.file, sets, deletes)
     if not args.dry_run:
         (changes_dir() / f"{payload['change_id']}.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    preview_cmd = wrapper_command(host, "plan-config-batch", batch_args(payload))
-    return emit({**payload, "approval": approval_hint({"host": args.host, "action": "apply-config-batch", "change_id": payload["change_id"]}), "remote_command": preview_cmd, "path": None if args.dry_run else str(changes_dir() / f"{payload['change_id']}.json")})
+    display = redacted_batch_payload(payload)
+    preview_cmd = wrapper_command(host, "plan-config-batch", batch_args(display))
+    return emit({**display, "approval": approval_hint({"host": args.host, "action": "apply-config-batch", "change_id": payload["change_id"]}), "remote_command": preview_cmd, "path": None if args.dry_run else str(changes_dir() / f"{payload['change_id']}.json")})
 
 
 def cmd_apply_config_batch(args: argparse.Namespace) -> int:

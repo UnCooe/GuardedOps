@@ -60,6 +60,18 @@ def completed_summary(command: list[str], cwd: Path | None = None) -> dict:
     }
 
 
+def resolve_exact_commit(repo: Path, ref: str) -> str:
+    if not re_match(HEX_RE, ref):
+        raise PolicyError("ref must be an exact hex commit SHA")
+    completed = subprocess.run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=repo, check=False, text=True, capture_output=True)
+    if completed.returncode != 0:
+        raise PolicyError("ref is not a commit object")
+    commit = completed.stdout.strip()
+    if not commit.startswith(ref.lower()):
+        raise PolicyError("ref must resolve to the matching commit object id")
+    return commit
+
+
 def app_path(policy: dict) -> Path:
     return Path(policy["app_path"]).resolve(strict=False)
 
@@ -226,10 +238,7 @@ def cmd_config_patch(policy: dict, args: argparse.Namespace) -> int:
     if args.dry_run:
         audit(policy, "config-patch", {"file": args.file, "key": key, "dry_run": True})
         return emit({"action": "config-patch", "file": args.file, "key": key, "target": str(target), "dry_run": True})
-    lines = read_env(target)
-    write_env(target, set_env_value(lines, key, value))
-    audit(policy, "config-patch", {"file": args.file, "key": key, "dry_run": False})
-    return emit({"action": "config-patch", "file": args.file, "key": key, "target": str(target), "applied": True})
+    raise PolicyError("config-patch write is disabled; use apply-config-batch with approval")
 
 
 def cmd_plan_config_batch(policy: dict, args: argparse.Namespace) -> int:
@@ -245,7 +254,7 @@ def cmd_plan_config_batch(policy: dict, args: argparse.Namespace) -> int:
         new_text, changed = patch_config_text(args.file, old_text, sets, deletes)
     except (ValueError, json.JSONDecodeError) as exc:
         raise PolicyError(str(exc)) from exc
-    diff = list(difflib.unified_diff(old_text.splitlines(), new_text.splitlines(), fromfile=args.file + ":current", tofile=args.file + ":planned", lineterm=""))
+    diff = [redact_text(line) for line in difflib.unified_diff(old_text.splitlines(), new_text.splitlines(), fromfile=args.file + ":current", tofile=args.file + ":planned", lineterm="")]
     change_id = hashlib.sha256(json.dumps({"file": args.file, "sets": sets, "deletes": deletes}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
     audit(policy, "plan-config-batch", {"file": args.file, "changed": sorted(changed), "change_id": change_id})
     return emit({"action": "plan-config-batch", "file": args.file, "change_id": change_id, "changed": sorted(changed), "diff": diff[:200]})
@@ -302,10 +311,9 @@ def cmd_safe_git(policy: dict, args: argparse.Namespace) -> int:
     elif args.op == "checkout":
         if not args.ref:
             raise PolicyError("safe-git checkout requires --ref")
-        if not re_match(HEX_RE, args.ref):
-            raise PolicyError("safe-git checkout requires an exact hex ref")
+        commit = resolve_exact_commit(repo, args.ref)
         require_approval(policy, args.approval_token, {"action": "safe-git-checkout", "ref": args.ref})
-        command.extend(["checkout", "--detach", args.ref])
+        command.extend(["checkout", "--detach", commit])
     else:
         raise PolicyError(f"git op is not allowed: {args.op}")
     completed = subprocess.run(command, check=False, text=True, capture_output=True)
@@ -321,12 +329,11 @@ def re_match(pattern: str, value: str) -> bool:
 
 def cmd_deploy_ref(policy: dict, args: argparse.Namespace) -> int:
     action_policy(policy, "deploy-ref")
-    if not re_match(HEX_RE, args.ref):
-        raise PolicyError("deploy ref must be an exact hex commit SHA")
-    require_approval(policy, args.approval_token, {"action": "deploy", "ref": args.ref})
     repo = app_path(policy)
+    commit = resolve_exact_commit(repo, args.ref)
+    require_approval(policy, args.approval_token, {"action": "deploy", "ref": args.ref})
     before = completed_summary(["git", "rev-parse", "HEAD"], cwd=repo)
-    checkout = completed_summary(["git", "checkout", "--detach", args.ref], cwd=repo)
+    checkout = completed_summary(["git", "checkout", "--detach", commit], cwd=repo)
     after = completed_summary(["git", "rev-parse", "HEAD"], cwd=repo)
     audit(policy, "deploy-ref", {"ref": args.ref, "returncode": checkout["returncode"]})
     return emit({"action": "deploy-ref", "ref": args.ref, "before": before, "checkout": checkout, "after": after})

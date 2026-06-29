@@ -27,6 +27,17 @@ class Approval:
 
     def require(self, expected: Mapping[str, str]) -> None:
         mismatches: list[str] = []
+        expected_keys = set(expected)
+        actual_keys = set(self.values)
+        if actual_keys != expected_keys:
+            missing = sorted(expected_keys - actual_keys)
+            extra = sorted(actual_keys - expected_keys)
+            details = []
+            if missing:
+                details.append("missing keys: " + ", ".join(missing))
+            if extra:
+                details.append("unexpected keys: " + ", ".join(extra))
+            raise ApprovalError("approval token scope mismatch: " + "; ".join(details))
         for key, value in expected.items():
             actual = self.values.get(key)
             if actual != value:
@@ -41,4 +52,3 @@ def validate_approval(token: str | None, expected: Mapping[str, str]) -> None:
 
 def approval_hint(expected: Mapping[str, str]) -> str:
     return " ".join(f"{key}={value}" for key, value in expected.items())
-

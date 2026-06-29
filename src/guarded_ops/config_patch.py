@@ -206,6 +206,6 @@ def patch_json(text: str, sets: list[dict[str, Any]], deletes: list[str]) -> tup
 
 
 def patch_config_text(file_name: str, text: str, sets: list[dict[str, Any]], deletes: list[str]) -> tuple[str, set[str]]:
-    if Path(file_name).name in {"config.env", ".env"}:
+    if Path(file_name).suffix == ".env" or Path(file_name).name == ".env":
         return patch_dotenv(text, sets, deletes)
     return patch_json(text, sets, deletes)
