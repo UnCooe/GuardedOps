@@ -24,6 +24,7 @@ policy files are used from this checkout.
 ```bash
 python -m venv .venv
 . .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -e .
 
 opsctl status --host staging

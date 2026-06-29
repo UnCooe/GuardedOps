@@ -68,6 +68,7 @@ states is outside the public validation contract.
 Local release validation:
 
 ```bash
+python -m pip install --upgrade pip
 python -m unittest discover -s tests
 scripts/release_gate.sh
 ```
