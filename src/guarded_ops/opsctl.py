@@ -498,13 +498,23 @@ def cmd_init_ssh_demo(args: argparse.Namespace) -> int:
             if ".git" in item.parts:
                 continue
             archive.add(item, arcname=str(item.relative_to(fixture)))
+    init_script = (
+        "set -eu; "
+        f"cd {shlex.quote(str(app_path))}; "
+        "git init -b main >/dev/null; "
+        "git config user.email guardedops-demo@example.com; "
+        "git config user.name 'GuardedOps Demo'; "
+        "git add .; "
+        "git commit -m 'initial demo app' >/dev/null; "
+        f"git init --bare {shlex.quote(str(sandbox_root / 'origin.git'))} >/dev/null; "
+        f"git remote add origin {shlex.quote(str(sandbox_root / 'origin.git'))}; "
+        "GIT_TERMINAL_PROMPT=0 git push origin HEAD:main >/dev/null"
+    )
     commands = [
         ["ssh", host["ssh_alias"], "--", "rm", "-rf", str(app_path), str(sandbox_root / "origin.git")],
         ["ssh", host["ssh_alias"], "--", "mkdir", "-p", str(app_path), str(audit_dir), str(backup_dir)],
-        ["scp", str(tar_path), f"{host['ssh_alias']}:/tmp/guardedops-demo-app.tar.gz"],
-        ["ssh", host["ssh_alias"], "--", "tar", "-xzf", "/tmp/guardedops-demo-app.tar.gz", "-C", str(app_path)],
-        ["ssh", host["ssh_alias"], "--", "sh", "-lc", f"cd {shlex.quote(str(app_path))} && git init >/dev/null && git config user.email guardedops-demo@example.com && git config user.name 'GuardedOps Demo' && git add . && git commit -m 'initial demo app' >/dev/null && git init --bare {shlex.quote(str(sandbox_root / 'origin.git'))} >/dev/null && git remote add origin {shlex.quote(str(sandbox_root / 'origin.git'))} && git push origin HEAD:main >/dev/null"],
-        ["ssh", host["ssh_alias"], "--", "rm", "-f", "/tmp/guardedops-demo-app.tar.gz"],
+        ["sh", "-lc", f"cat {shlex.quote(str(tar_path))} | ssh {shlex.quote(host['ssh_alias'])} -- tar -xzf - -C {shlex.quote(str(app_path))}"],
+        ["ssh", host["ssh_alias"], "--", "sh", "-lc", init_script],
     ]
     if args.dry_run:
         return emit({"kind": "init-ssh-demo-plan", "host": args.host, "commands": commands, "tar": str(tar_path), "app": str(app_path), "origin": str(sandbox_root / "origin.git"), "audit_dir": str(audit_dir), "backup_dir": str(backup_dir), "dry_run": True})

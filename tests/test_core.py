@@ -483,6 +483,7 @@ class OpsctlTests(unittest.TestCase):
         self.assertEqual(payload["backup_dir"], "/var/backups/guardedops-demo")
         self.assertNotIn("/opt/project", rendered)
         self.assertNotIn("aiserver", rendered)
+        self.assertNotIn("/tmp/guardedops-demo-app", rendered)
 
 
 class WrapperRouteReviewHookTests(unittest.TestCase):
