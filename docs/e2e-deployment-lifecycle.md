@@ -68,6 +68,7 @@ states is outside the public validation contract.
 Local release validation:
 
 ```bash
+python --version  # must be 3.11+
 python -m pip install --upgrade pip
 python -m unittest discover -s tests
 scripts/release_gate.sh
@@ -98,4 +99,6 @@ opsctl --dry-run install-wrapper --host demo-ssh
 opsctl install-wrapper --host demo-ssh
 opsctl --dry-run init-ssh-demo --host demo-ssh --reset
 opsctl init-ssh-demo --host demo-ssh --reset
+opsctl restart-service --host demo-ssh \
+  --approval-token "host=demo-ssh action=restart-service service=guardedops_demo"
 ```

@@ -22,7 +22,7 @@ installs the CLI entrypoints, while the public examples, wrapper script, and
 policy files are used from this checkout.
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -e .
