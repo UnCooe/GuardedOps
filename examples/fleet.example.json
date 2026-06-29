@@ -1,9 +1,70 @@
 {
   "rollout_order": [
+    "demo-local",
     "prod-us",
     "prod-eu"
   ],
   "hosts": {
+    "demo-local": {
+      "ssh_alias": "local-demo",
+      "transport": "local",
+      "allow_untrusted_policy": true,
+      "region": "Local Demo",
+      "remote_user": "deploy-user",
+      "app_path": ".guarded_ops/demo-local/app",
+      "demo_fixture": "examples/demo-remote/app",
+      "service": "guardedops-demo",
+      "server_wrapper": "server/ops-wrapper",
+      "policy_path": "examples/demo-remote/policy.json",
+      "config_files": {
+        "config/app.env": {
+          "allowed_keys": [
+            "APP_LOG_LEVEL",
+            "FEATURE_FLAG_X"
+          ]
+        },
+        "config/app.json": {
+          "allowed_keys": [
+            "feature.enabled",
+            "limits.timeout_ms"
+          ]
+        }
+      },
+      "forbid_full_copy": [
+        "config/app.env",
+        "config/app.json",
+        ".env"
+      ]
+    },
+    "demo-ssh": {
+      "ssh_alias": "example-demo-host",
+      "transport": "ssh",
+      "region": "SSH Demo Template",
+      "remote_user": "deploy-user",
+      "app_path": "/opt/guardedops-demo/app",
+      "service": "guardedops_demo",
+      "server_wrapper": "/usr/local/bin/ops-wrapper-demo",
+      "policy_path": "/etc/guardedops-demo/policy.json",
+      "config_files": {
+        "config/app.env": {
+          "allowed_keys": [
+            "APP_LOG_LEVEL",
+            "FEATURE_FLAG_X"
+          ]
+        },
+        "config/app.json": {
+          "allowed_keys": [
+            "feature.enabled",
+            "limits.timeout_ms"
+          ]
+        }
+      },
+      "forbid_full_copy": [
+        "config/app.env",
+        "config/app.json",
+        ".env"
+      ]
+    },
     "staging": {
       "ssh_alias": "example-staging",
       "region": "Staging",
@@ -50,4 +111,3 @@
     }
   }
 }
-

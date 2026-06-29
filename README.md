@@ -17,9 +17,9 @@ proxy profiles, logs, sessions, or secret-like values in this repository.
 
 ## Quick Start
 
-GuardedOps v0.1 is a repo-checkout alpha. The Python package installs the CLI
-entrypoints, while the public examples, wrapper script, and policy files are
-used from this checkout.
+GuardedOps v0.2 is a repo-checkout reference implementation. The Python package
+installs the CLI entrypoints, while the public examples, wrapper script, and
+policy files are used from this checkout.
 
 ```bash
 python -m venv .venv
@@ -27,6 +27,8 @@ python -m venv .venv
 pip install -e .
 
 opsctl status --host staging
+opsctl init-demo --force
+opsctl baseline --host demo-local
 opsctl plan-config --host staging --file config/app.env --set APP_LOG_LEVEL=debug
 opsctl apply-config --host staging --change-id <change-id> \
   --approval-token "host=staging action=apply-config change_id=<change-id>"
@@ -38,12 +40,15 @@ ops-review collect --input examples/session-review/sessions --output .guarded_op
 scripts/leak_scan.sh --public .
 ```
 
+For the v0.2 end-to-end lifecycle target and sandbox validation contract, see
+`docs/e2e-deployment-lifecycle.md`.
+
 ## Safety Model
 
 GuardedOps is designed around four ideas:
 
 - Plan before apply.
-- Authorize with exact action tokens. In v0.1 these are illustrative
+- Authorize with exact action tokens. In v0.2 these are illustrative
   exact-match approvals; add expiry, nonce, and an external approval system
   before adapting the pattern to real privileged operations.
 - Keep remote capabilities narrow and policy-driven.

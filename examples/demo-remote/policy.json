@@ -1,10 +1,12 @@
 {
-  "policy_version": "example-v1",
-  "host": "staging",
-  "service": "example-app",
-  "app_path": "examples/mock-app",
+  "policy_version": "demo-v2",
+  "host": "demo-local",
+  "service": "guardedops-demo",
+  "service_adapter": "mock",
+  "app_path": "examples/demo-remote/app",
   "version_file": "server/ops-wrapper.version.json",
-  "audit_log": ".guarded_ops/audit.jsonl",
+  "audit_log": ".guarded_ops/demo-audit.jsonl",
+  "backup_dir": ".guarded_ops/demo-backups",
   "actions": {
     "host-observe": {
       "enabled": true
@@ -24,8 +26,13 @@
         "config/app.env": {
           "allowed_keys": [
             "APP_LOG_LEVEL",
-            "FEATURE_FLAG_X",
-            "PAYMENTS_TIMEOUT_MS"
+            "FEATURE_FLAG_X"
+          ]
+        },
+        "config/app.json": {
+          "allowed_keys": [
+            "feature.enabled",
+            "limits.timeout_ms"
           ]
         }
       }
@@ -33,7 +40,7 @@
     "log-query": {
       "enabled": true,
       "roots": [
-        "examples/mock-app/logs"
+        "examples/demo-remote/app/logs"
       ],
       "max_lines": 200
     },

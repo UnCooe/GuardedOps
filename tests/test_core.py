@@ -8,6 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
 from guarded_ops.approval import Approval, ApprovalError, validate_approval
 from guarded_ops.config_patch import parse_set_expr
 from guarded_ops.fleet import host_config, load_fleet
@@ -15,7 +18,6 @@ from guarded_ops.hook_policy import decide_command
 from guarded_ops.redaction import redact_text
 
 
-ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
 
 
@@ -197,22 +199,216 @@ class OpsctlTests(unittest.TestCase):
         sha = run_cli([PYTHON, "-m", "guarded_ops.opsctl", "plan-deploy", "--host", "staging", "--ref", "abcdef0"], cwd=self.tmp)
         self.assertEqual(sha.returncode, 0, sha.stderr)
 
+    def init_demo_repo(self) -> tuple[Path, str]:
+        init = run_cli([PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "init-demo", "--force"], cwd=self.tmp)
+        self.assertEqual(init.returncode, 0, init.stderr)
+        payload = json.loads(init.stdout)
+        app = Path(payload["app_path"])
+        head = payload["head"]
+        return app, head
+
+    def test_demo_local_lifecycle_via_opsctl(self) -> None:
+        app, head = self.init_demo_repo()
+        baseline = run_cli([PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "baseline", "--host", "demo-local"], cwd=self.tmp)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        self.assertIn(head, baseline.stdout)
+        self.assertIn(".guarded_ops/demo-local/app", baseline.stdout)
+        self.assertNotIn("../../../README.md", baseline.stdout)
+
+        fetch_token = "host=demo-local action=safe-git-fetch remote=origin"
+        fetch = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "git", "--host", "demo-local", "--op", "fetch", "--remote", "origin", "--approval-token", fetch_token],
+            cwd=self.tmp,
+        )
+        self.assertEqual(fetch.returncode, 0, fetch.stderr)
+
+        bad_checkout = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "git", "--host", "demo-local", "--op", "checkout", "--ref", "main", "--approval-token", "host=demo-local action=safe-git-checkout ref=main"],
+            cwd=self.tmp,
+        )
+        self.assertNotEqual(bad_checkout.returncode, 0)
+        self.assertIn("exact hex ref", bad_checkout.stderr)
+
+        checkout_token = f"host=demo-local action=safe-git-checkout ref={head}"
+        checkout = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "git", "--host", "demo-local", "--op", "checkout", "--ref", head, "--approval-token", checkout_token],
+            cwd=self.tmp,
+        )
+        self.assertEqual(checkout.returncode, 0, checkout.stderr)
+
+        plan = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "--fleet",
+                "examples/fleet.example.json",
+                "plan-config-batch",
+                "--host",
+                "demo-local",
+                "--file",
+                "config/app.json",
+                "--set",
+                "feature.enabled=true",
+                "--set",
+                "limits.timeout_ms=2500",
+            ],
+            cwd=self.tmp,
+        )
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        plan_payload = json.loads(plan.stdout)
+        apply_result = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "--fleet",
+                "examples/fleet.example.json",
+                "apply-config-batch",
+                "--change-id",
+                plan_payload["change_id"],
+                "--approval-token",
+                plan_payload["approval"],
+            ],
+            cwd=self.tmp,
+        )
+        self.assertEqual(apply_result.returncode, 0, apply_result.stderr)
+        config = json.loads((app / "config/app.json").read_text(encoding="utf-8"))
+        self.assertTrue(config["feature"]["enabled"])
+        self.assertEqual(config["limits"]["timeout_ms"], 2500)
+        self.assertTrue((self.tmp / ".guarded_ops/demo-local/audit.jsonl").exists())
+        self.assertTrue((self.tmp / ".guarded_ops/demo-local/backups").exists())
+
+        restart = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "--fleet",
+                "examples/fleet.example.json",
+                "restart-service",
+                "--host",
+                "demo-local",
+                "--approval-token",
+                "host=demo-local action=restart-service service=guardedops-demo",
+            ],
+            cwd=self.tmp,
+        )
+        self.assertEqual(restart.returncode, 0, restart.stderr)
+        logs = run_cli([PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "logs", "--host", "demo-local", "--name", "current.log"], cwd=self.tmp)
+        self.assertEqual(logs.returncode, 0, logs.stderr)
+        self.assertIn("restarted", logs.stdout)
+
+    def test_demo_local_rejects_bad_config_and_service_scope(self) -> None:
+        self.init_demo_repo()
+        bad_key = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "plan-config-batch", "--host", "demo-local", "--file", "config/app.json", "--set", "secret.token=abc"],
+            cwd=self.tmp,
+        )
+        self.assertNotEqual(bad_key.returncode, 0)
+        self.assertIn("not allowed", bad_key.stderr)
+        bad_service = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "restart-service", "--host", "demo-local", "--service", "other", "--approval-token", "host=demo-local action=restart-service service=other"],
+            cwd=self.tmp,
+        )
+        self.assertNotEqual(bad_service.returncode, 0)
+        self.assertIn("service is not allowed", bad_service.stderr)
+
+    def test_install_wrapper_local_copies_wrapper_and_policy(self) -> None:
+        target = self.tmp / "demo-install"
+        fleet = {
+            "hosts": {
+                "install-demo": {
+                    "ssh_alias": "local-install",
+                    "transport": "local",
+                    "allow_untrusted_policy": True,
+                    "app_path": "examples/demo-remote/app",
+                    "service": "guardedops-demo",
+                    "server_wrapper": str(target / "ops-wrapper-demo"),
+                    "policy_path": str(target / "policy.json"),
+                    "config_files": {
+                        "config/app.env": {"allowed_keys": ["APP_LOG_LEVEL"]}
+                    },
+                }
+            }
+        }
+        fleet_path = self.tmp / "install-fleet.json"
+        fleet_path.write_text(json.dumps(fleet), encoding="utf-8")
+        result = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "--fleet",
+                str(fleet_path),
+                "install-wrapper",
+                "--host",
+                "install-demo",
+                "--wrapper-source",
+                "server/ops-wrapper",
+                "--policy-source",
+                "examples/demo-remote/policy.json",
+            ],
+            cwd=self.tmp,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((target / "ops-wrapper-demo").exists())
+        self.assertTrue((target / "policy.json").exists())
+        self.assertTrue((target / "src/guarded_ops/wrapper.py").exists())
+
+    def test_install_wrapper_ssh_plan_targets_configured_paths(self) -> None:
+        result = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "--dry-run",
+                "install-wrapper",
+                "--host",
+                "demo-ssh",
+                "--wrapper-source",
+                "server/ops-wrapper",
+                "--policy-source",
+                "examples/demo-remote/policy.json",
+            ],
+            cwd=self.tmp,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        rendered = json.dumps(payload)
+        self.assertIn("/usr/local/bin/ops-wrapper-demo", rendered)
+        self.assertIn("/etc/guardedops-demo/policy.json", rendered)
+        self.assertIn("/etc/guardedops-demo/src", rendered)
+        generated = json.loads((self.tmp / payload["generated_policy"]).read_text(encoding="utf-8"))
+        self.assertEqual(generated["host"], "demo-ssh")
+        self.assertEqual(generated["app_path"], "/opt/guardedops-demo/app")
+        self.assertEqual(generated["service"], "guardedops_demo")
+        self.assertEqual(generated["actions"]["log-query"]["roots"], ["/opt/guardedops-demo/app/logs"])
+
 
 class WrapperRouteReviewHookTests(unittest.TestCase):
     def test_wrapper_observe_and_log_query_redacts(self) -> None:
-        log_path = ROOT / "examples/mock-app/logs/current.log"
-        original = log_path.read_text(encoding="utf-8")
-        try:
-            log_path.write_text(original + "token=abc123 password=hunter2\n", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app_path = tmp_path / "app"
+            log_path = app_path / "logs/current.log"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text("token=abc123 password=hunter2\n", encoding="utf-8")
+            policy = json.loads((ROOT / "server/policy.example.json").read_text(encoding="utf-8"))
+            policy["app_path"] = str(app_path)
+            policy["actions"]["log-query"]["roots"] = [str(log_path.parent)]
+            policy_path = tmp_path / "policy.json"
+            policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             result = run_cli(
                 [
                     PYTHON,
                     "server/ops-wrapper",
                     "--policy",
-                    "server/policy.example.json",
+                    str(policy_path),
+                    "--allow-untrusted-policy",
                     "log-query",
                     "--path",
-                    "examples/mock-app/logs/current.log",
+                    str(log_path),
                     "--lines",
                     "5",
                 ]
@@ -222,14 +418,12 @@ class WrapperRouteReviewHookTests(unittest.TestCase):
             self.assertIn("password=<redacted>", result.stdout)
             self.assertNotIn("abc123", result.stdout)
             self.assertNotIn("hunter2", result.stdout)
-        finally:
-            log_path.write_text(original, encoding="utf-8")
 
     def test_wrapper_version_uses_sidecar(self) -> None:
         result = run_cli([PYTHON, "server/ops-wrapper", "--policy", "server/policy.example.json", "version"])
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["version"], "0.1.0")
+        self.assertEqual(payload["version"], "0.2.0")
         self.assertEqual(payload["policy_version"], "example-v1")
 
     def test_wrapper_config_patch_dry_run_and_allowlist(self) -> None:
@@ -265,6 +459,37 @@ class WrapperRouteReviewHookTests(unittest.TestCase):
         )
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("not allowed", rejected.stderr)
+
+    def test_wrapper_high_risk_actions_require_approval(self) -> None:
+        for command in (
+            [PYTHON, "server/ops-wrapper", "--policy", "examples/demo-remote/policy.json", "--allow-untrusted-policy", "restart-service", "--service-name", "guardedops-demo"],
+            [PYTHON, "server/ops-wrapper", "--policy", "examples/demo-remote/policy.json", "--allow-untrusted-policy", "safe-git", "--op", "fetch"],
+            [PYTHON, "server/ops-wrapper", "--policy", "examples/demo-remote/policy.json", "--allow-untrusted-policy", "safe-git", "--op", "checkout", "--ref", "abcdef0"],
+            [PYTHON, "server/ops-wrapper", "--policy", "examples/demo-remote/policy.json", "--allow-untrusted-policy", "apply-config-batch", "--change-id", "bad", "--file", "config/app.json", "--set", "feature.enabled=true"],
+            [PYTHON, "server/ops-wrapper", "--policy", "examples/demo-remote/policy.json", "--allow-untrusted-policy", "deploy-ref", "--ref", "abcdef0"],
+        ):
+            with self.subTest(command=command):
+                result = run_cli(command)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("approval", result.stderr)
+
+    def test_wrapper_safe_git_rejects_unsafe_read_ref(self) -> None:
+        result = run_cli(
+            [
+                PYTHON,
+                "server/ops-wrapper",
+                "--policy",
+                "examples/demo-remote/policy.json",
+                "--allow-untrusted-policy",
+                "safe-git",
+                "--op",
+                "rev-parse",
+                "--ref",
+                "../bad",
+            ]
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe git ref", result.stderr)
 
     def test_wrapper_rejects_non_default_policy_without_explicit_local_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
