@@ -452,6 +452,7 @@ class OpsctlTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         rendered = json.dumps(payload)
         self.assertIn("/usr/local/bin/ops-wrapper-demo", rendered)
+        self.assertNotIn("mkdir\", \"-p\", \"/usr/local/bin", rendered)
         self.assertIn("/etc/guardedops-demo/policy.json", rendered)
         self.assertIn("/etc/guardedops-demo/src", rendered)
         generated = json.loads((self.tmp / payload["generated_policy"]).read_text(encoding="utf-8"))

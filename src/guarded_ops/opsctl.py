@@ -448,7 +448,7 @@ def cmd_install_wrapper(args: argparse.Namespace) -> int:
         policy_path = host["policy_path"]
         runtime_dir = str(Path(policy_path).parent / "src")
         commands = [
-            ["ssh", host["ssh_alias"], "--", "mkdir", "-p", str(Path(wrapper_path).parent), str(Path(policy_path).parent), runtime_dir],
+            ["ssh", host["ssh_alias"], "--", "mkdir", "-p", str(Path(policy_path).parent), runtime_dir],
             ["scp", args.wrapper_source, f"{host['ssh_alias']}:{wrapper_path}"],
             ["scp", str(generated_policy), f"{host['ssh_alias']}:{policy_path}"],
             ["scp", "-r", str(runtime_source), f"{host['ssh_alias']}:{runtime_dir}/"],
