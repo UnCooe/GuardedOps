@@ -22,6 +22,8 @@ class Approval:
             key, value = item.split("=", 1)
             if not key:
                 raise ApprovalError(f"approval token item has empty key: {item}")
+            if key in values:
+                raise ApprovalError(f"approval token duplicate key: {key}")
             values[key] = value
         return cls(values)
 

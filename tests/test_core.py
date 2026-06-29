@@ -33,6 +33,8 @@ class ApprovalFleetTests(unittest.TestCase):
             Approval.parse("host=staging action=deploy ref=abcdef0").require({"host": "prod-us", "action": "deploy", "ref": "abcdef0"})
         with self.assertRaisesRegex(ApprovalError, "unexpected keys"):
             Approval.parse("host=staging action=deploy ref=abcdef0 extra=1").require({"host": "staging", "action": "deploy", "ref": "abcdef0"})
+        with self.assertRaisesRegex(ApprovalError, "duplicate key"):
+            Approval.parse("host=staging action=deploy ref=bad ref=abcdef0")
 
     def test_example_fleet_loads_and_unknown_host_fails(self) -> None:
         fleet = load_fleet(ROOT / "examples/fleet.example.json")
@@ -349,6 +351,45 @@ class OpsctlTests(unittest.TestCase):
         self.assertEqual(plan.returncode, 0, plan.stderr)
         self.assertIn("<redacted>", plan.stdout)
         self.assertNotIn("supersecret", plan.stdout)
+
+    def test_apply_config_batch_rejects_duplicate_approval_key(self) -> None:
+        self.init_demo_repo()
+        plan = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "--fleet",
+                "examples/fleet.example.json",
+                "plan-config-batch",
+                "--host",
+                "demo-local",
+                "--file",
+                "config/app.json",
+                "--set",
+                "feature.enabled=true",
+            ],
+            cwd=self.tmp,
+        )
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        payload = json.loads(plan.stdout)
+        duplicate = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "--fleet",
+                "examples/fleet.example.json",
+                "apply-config-batch",
+                "--change-id",
+                payload["change_id"],
+                "--approval-token",
+                f"host=demo-local action=apply-config-batch change_id=bad change_id={payload['change_id']}",
+            ],
+            cwd=self.tmp,
+        )
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn("duplicate key", duplicate.stderr)
 
     def test_install_wrapper_local_copies_wrapper_and_policy(self) -> None:
         target = self.tmp / "demo-install"
