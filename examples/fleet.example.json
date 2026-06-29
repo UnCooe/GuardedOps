@@ -42,6 +42,7 @@
       "region": "SSH Demo Template",
       "remote_user": "deploy-user",
       "app_path": "/opt/guardedops-demo/app",
+      "demo_fixture": "examples/demo-remote/app",
       "service": "guardedops_demo",
       "server_wrapper": "/usr/local/bin/ops-wrapper-demo",
       "policy_path": "/etc/guardedops-demo/policy.json",

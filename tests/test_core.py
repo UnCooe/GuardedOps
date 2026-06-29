@@ -463,6 +463,27 @@ class OpsctlTests(unittest.TestCase):
         self.assertEqual(generated["backup_dir"], "/var/backups/guardedops-demo")
         self.assertEqual(generated["actions"]["log-query"]["roots"], ["/opt/guardedops-demo/app/logs"])
 
+    def test_init_ssh_demo_dry_run_is_sandbox_scoped(self) -> None:
+        missing_reset = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "--dry-run", "init-ssh-demo", "--host", "demo-ssh"],
+            cwd=self.tmp,
+        )
+        self.assertNotEqual(missing_reset.returncode, 0)
+        self.assertIn("--reset", missing_reset.stderr)
+        result = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "--dry-run", "init-ssh-demo", "--host", "demo-ssh", "--reset"],
+            cwd=self.tmp,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        rendered = json.dumps(payload)
+        self.assertEqual(payload["app"], "/opt/guardedops-demo/app")
+        self.assertEqual(payload["origin"], "/opt/guardedops-demo/origin.git")
+        self.assertEqual(payload["audit_dir"], "/var/log/guardedops-demo")
+        self.assertEqual(payload["backup_dir"], "/var/backups/guardedops-demo")
+        self.assertNotIn("/opt/project", rendered)
+        self.assertNotIn("aiserver", rendered)
+
 
 class WrapperRouteReviewHookTests(unittest.TestCase):
     def make_policy_repo(self, tmp_path: Path) -> tuple[Path, str, Path]:

@@ -89,3 +89,12 @@ opsctl restart-service --host demo-local \
   --approval-token "host=demo-local action=restart-service service=guardedops-demo"
 opsctl logs --host demo-local --name current.log
 ```
+
+Representative SSH sandbox bootstrap:
+
+```bash
+opsctl --dry-run install-wrapper --host demo-ssh
+opsctl install-wrapper --host demo-ssh
+opsctl --dry-run init-ssh-demo --host demo-ssh --reset
+opsctl init-ssh-demo --host demo-ssh --reset
+```

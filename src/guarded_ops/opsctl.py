@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -475,6 +476,46 @@ def cmd_install_wrapper(args: argparse.Namespace) -> int:
     return emit({"kind": "install-wrapper", "host": args.host, "wrapper": str(wrapper_target), "policy": str(policy_target), "runtime_dir": str(runtime_target.parent), "generated_policy": str(generated_policy), "installed": True})
 
 
+def cmd_init_ssh_demo(args: argparse.Namespace) -> int:
+    _, host = common_host(args)
+    if not args.reset:
+        raise GuardedOpsError("init-ssh-demo requires --reset")
+    if host.get("transport") != "ssh":
+        raise GuardedOpsError("init-ssh-demo requires an ssh transport host")
+    app_path = Path(str(host["app_path"]))
+    sandbox_root = Path("/opt/guardedops-demo")
+    if app_path != sandbox_root / "app":
+        raise GuardedOpsError("init-ssh-demo only supports app_path /opt/guardedops-demo/app")
+    backup_dir = Path("/var/backups/guardedops-demo")
+    audit_dir = Path("/var/log/guardedops-demo")
+    fixture = Path(host.get("demo_fixture") or "examples/demo-remote/app")
+    if not fixture.exists():
+        raise GuardedOpsError(f"demo fixture not found: {fixture}")
+    tar_path = state_root() / "install" / "demo-app.tar.gz"
+    tar_path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tar_path, "w:gz") as archive:
+        for item in sorted(fixture.rglob("*")):
+            if ".git" in item.parts:
+                continue
+            archive.add(item, arcname=str(item.relative_to(fixture)))
+    commands = [
+        ["ssh", host["ssh_alias"], "--", "rm", "-rf", str(app_path), str(sandbox_root / "origin.git")],
+        ["ssh", host["ssh_alias"], "--", "mkdir", "-p", str(app_path), str(audit_dir), str(backup_dir)],
+        ["scp", str(tar_path), f"{host['ssh_alias']}:/tmp/guardedops-demo-app.tar.gz"],
+        ["ssh", host["ssh_alias"], "--", "tar", "-xzf", "/tmp/guardedops-demo-app.tar.gz", "-C", str(app_path)],
+        ["ssh", host["ssh_alias"], "--", "sh", "-lc", f"cd {shlex.quote(str(app_path))} && git init >/dev/null && git config user.email guardedops-demo@example.com && git config user.name 'GuardedOps Demo' && git add . && git commit -m 'initial demo app' >/dev/null && git init --bare {shlex.quote(str(sandbox_root / 'origin.git'))} >/dev/null && git remote add origin {shlex.quote(str(sandbox_root / 'origin.git'))} && git push origin HEAD:main >/dev/null"],
+        ["ssh", host["ssh_alias"], "--", "rm", "-f", "/tmp/guardedops-demo-app.tar.gz"],
+    ]
+    if args.dry_run:
+        return emit({"kind": "init-ssh-demo-plan", "host": args.host, "commands": commands, "tar": str(tar_path), "app": str(app_path), "origin": str(sandbox_root / "origin.git"), "audit_dir": str(audit_dir), "backup_dir": str(backup_dir), "dry_run": True})
+    for command in commands:
+        rc = run_json(command)
+        if rc != 0:
+            return rc
+    head = subprocess.run(["ssh", host["ssh_alias"], "--", "git", "-C", str(app_path), "rev-parse", "HEAD"], check=False, text=True, capture_output=True)
+    return emit({"kind": "init-ssh-demo", "host": args.host, "app": str(app_path), "origin": str(sandbox_root / "origin.git"), "audit_dir": str(audit_dir), "backup_dir": str(backup_dir), "head": head.stdout.strip(), "initialized": True})
+
+
 def cmd_rollback(args: argparse.Namespace) -> int:
     validate_approval(args.approval_token, {"host": args.host, "action": "rollback", "rollback_id": args.rollback_id})
     if args.dry_run:
@@ -507,6 +548,7 @@ def build_parser() -> argparse.ArgumentParser:
         "deploy": cmd_deploy,
         "restart-service": cmd_restart_service,
         "install-wrapper": cmd_install_wrapper,
+        "init-ssh-demo": cmd_init_ssh_demo,
         "rollback": cmd_rollback,
     }.items():
         cmd = sub.add_parser(name)
@@ -541,6 +583,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["install-wrapper"].add_argument("--policy-source", default="server/policy.example.json")
     sub.choices["install-wrapper"].add_argument("--runtime-source", default="src/guarded_ops")
     sub.choices["install-wrapper"].add_argument("--target-dir")
+    sub.choices["init-ssh-demo"].add_argument("--reset", action="store_true")
     sub.choices["rollback"].add_argument("--host", required=True)
     sub.choices["rollback"].add_argument("--rollback-id", required=True)
     sub.choices["rollback"].add_argument("--approval-token", required=True)
