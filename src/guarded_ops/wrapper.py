@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import __version__
 from .approval import validate_approval
-from .audit import AuditFilters, append_event, default_run_id, emit_summary, event_payload, new_operation_id
+from .audit import AuditFilters, IDENTIFIER_RE, append_event, default_run_id, emit_summary, event_payload, new_operation_id
 from .config_patch import parse_batch_set_expr, parse_set_expr, patch_config_text, read_env, set_env_value, write_env
 from .errors import AuditWriteError, GuardedOpsError, PolicyError
 from .policy import action_policy, load_policy
@@ -35,8 +35,11 @@ def emit(payload: dict) -> int:
 
 def audit_metadata(policy: dict, args: argparse.Namespace, action: str, operation_kind: str, operation_id: str | None = None) -> dict:
     version = version_payload(policy)
+    explicit_operation_id = operation_id or getattr(args, "operation_id", None)
+    if explicit_operation_id is not None and not IDENTIFIER_RE.fullmatch(str(explicit_operation_id)):
+        raise GuardedOpsError("operation_id has an invalid format")
     return {
-        "operation_id": operation_id or new_operation_id(action),
+        "operation_id": str(explicit_operation_id) if explicit_operation_id is not None else new_operation_id(action),
         "run_id": getattr(args, "run_id", None) or default_run_id(),
         "host": host_id(policy),
         "action": action,
@@ -545,6 +548,10 @@ def add_run_id(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-id")
 
 
+def add_operation_id(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--operation-id")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ops-wrapper")
     parser.add_argument("--policy", default="server/policy.example.json")
@@ -580,6 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_batch.set_defaults(func=cmd_plan_config_batch)
     apply_batch = sub.add_parser("apply-config-batch")
     add_run_id(apply_batch)
+    add_operation_id(apply_batch)
     apply_batch.add_argument("--change-id", required=True)
     apply_batch.add_argument("--approval-token", required=True)
     apply_batch.add_argument("--file", required=True)
@@ -588,6 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply_batch.set_defaults(func=cmd_apply_config_batch)
     git = sub.add_parser("safe-git")
     add_run_id(git)
+    add_operation_id(git)
     git.add_argument("--op", required=True, choices=["status", "rev-parse", "log", "fetch", "checkout"])
     git.add_argument("--ref")
     git.add_argument("--remote", default="origin")
@@ -596,11 +605,13 @@ def build_parser() -> argparse.ArgumentParser:
     git.set_defaults(func=cmd_safe_git)
     deploy = sub.add_parser("deploy-ref")
     add_run_id(deploy)
+    add_operation_id(deploy)
     deploy.add_argument("--ref", required=True)
     deploy.add_argument("--approval-token", required=True)
     deploy.set_defaults(func=cmd_deploy_ref)
     restart = sub.add_parser("restart-service")
     add_run_id(restart)
+    add_operation_id(restart)
     restart.add_argument("--service-name", required=True)
     restart.add_argument("--approval-token", required=True)
     restart.set_defaults(func=cmd_restart_service)

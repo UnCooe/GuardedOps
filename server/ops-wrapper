@@ -5,6 +5,7 @@ from pathlib import Path
 
 candidate_paths = [
     os.getenv("GUARDEDOPS_SRC"),
+    str(Path(__file__).resolve().parent / "src"),
     str(Path(__file__).resolve().parents[1] / "src"),
     "/etc/guardedops-demo/src",
     "/etc/ops-wrapper/src",

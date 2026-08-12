@@ -948,6 +948,26 @@ class AuditContractTests(unittest.TestCase):
         self.assertEqual(sibling.returncode, 0, sibling.stderr)
         self.assertEqual(sibling.stdout.strip(), "sibling")
 
+    def test_wrapper_runtime_path_supports_install_wrapper_sibling_src_layout(self) -> None:
+        wrapper = self.tmp / "installed/ops-wrapper"
+        wrapper.parent.mkdir(parents=True)
+        shutil.copy2(ROOT / "server/ops-wrapper", wrapper)
+        package = wrapper.parent / "src/guarded_ops"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "wrapper.py").write_text(
+            "def main():\n    print('installed-sibling')\n    return 0\n",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env.pop("GUARDEDOPS_SRC", None)
+        env.pop("PYTHONPATH", None)
+
+        result = subprocess.run([PYTHON, str(wrapper)], cwd=self.tmp, env=env, text=True, capture_output=True, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "installed-sibling")
+
 
 if __name__ == "__main__":
     unittest.main()

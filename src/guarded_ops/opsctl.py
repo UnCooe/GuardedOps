@@ -15,8 +15,10 @@ from typing import Any
 
 from .approval import approval_hint, validate_approval
 from .config_patch import parse_batch_set_expr, parse_set_expr, read_env, set_env_value, write_env
+from .audit import default_run_id, new_operation_id
 from .errors import GuardedOpsError
 from .fleet import allowed_config_key, host_config, load_fleet, resolve_app_path
+from .intent import append_intent, intent_payload
 from .redaction import redact_value
 
 SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
@@ -105,6 +107,35 @@ def append_run_id(args: argparse.Namespace, rendered: list[str]) -> list[str]:
     return rendered
 
 
+def wrapper_write_intent(
+    args: argparse.Namespace,
+    host: dict[str, Any],
+    action: str,
+    rendered: list[str],
+    *,
+    details: dict[str, Any],
+) -> list[str]:
+    operation_id = getattr(args, "operation_id", None) or new_operation_id(action)
+    run_id = getattr(args, "run_id", None) or default_run_id()
+    rendered_with_ids = [*rendered, "--operation-id", operation_id, "--run-id", run_id]
+    if not args.dry_run:
+        command = ["ops-wrapper", action, *rendered_with_ids]
+        append_intent(
+            None,
+            intent_payload(
+                operation_id=operation_id,
+                run_id=run_id,
+                host=str(host.get("host") or getattr(args, "host", None) or details.get("host") or "unknown"),
+                action=action,
+                operation_kind="write",
+                transport=str(host.get("transport") or "local"),
+                command=command,
+                details=details,
+            ),
+        )
+    return rendered_with_ids
+
+
 def run_checked(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(command, cwd=cwd, check=False, text=True, capture_output=True)
     if completed.returncode != 0:
@@ -188,6 +219,7 @@ def redacted_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def common_host(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
     fleet = load_fleet(args.fleet)
     host = host_config(fleet, args.host)
+    host = {**host, "host": args.host}
     return fleet, prepare_local_demo_host(host)
 
 
@@ -346,7 +378,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         raise GuardedOpsError("deploy ref must be an exact hex commit SHA, 7 to 64 characters")
     validate_approval(args.approval_token, {"host": args.host, "action": "deploy", "ref": args.ref})
     if host.get("transport"):
-        return run_wrapper(args, host, "deploy-ref", append_run_id(args, ["--ref", args.ref, "--approval-token", args.approval_token]))
+        rendered = wrapper_write_intent(
+            args,
+            host,
+            "deploy-ref",
+            ["--ref", args.ref, "--approval-token", args.approval_token],
+            details={"host": args.host, "ref": args.ref},
+        )
+        return run_wrapper(args, host, "deploy-ref", rendered)
     if args.dry_run:
         return emit({"kind": "deploy-apply-plan", "host": args.host, "service": host["service"], "ref": args.ref, "dry_run": True})
     record = {"kind": "deploy-record", "host": args.host, "service": host["service"], "ref": args.ref, "deployed_at": utc_now()}
@@ -384,7 +423,17 @@ def cmd_git(args: argparse.Namespace) -> int:
             rendered.extend(["--ref", args.ref])
     if args.limit is not None:
         rendered.extend(["--limit", str(args.limit)])
-    return run_wrapper(args, host, "safe-git", append_run_id(args, rendered))
+    if op in {"fetch", "checkout"}:
+        rendered = wrapper_write_intent(
+            args,
+            host,
+            "safe-git",
+            rendered,
+            details={"host": args.host, "op": op, "remote": args.remote, "ref": args.ref},
+        )
+    else:
+        rendered = append_run_id(args, rendered)
+    return run_wrapper(args, host, "safe-git", rendered)
 
 
 def cmd_restart_service(args: argparse.Namespace) -> int:
@@ -393,7 +442,14 @@ def cmd_restart_service(args: argparse.Namespace) -> int:
     if service != host["service"]:
         raise GuardedOpsError(f"service is not allowed for host {args.host}: {service}")
     validate_approval(args.approval_token, {"host": args.host, "action": "restart-service", "service": service})
-    return run_wrapper(args, host, "restart-service", append_run_id(args, ["--service-name", service, "--approval-token", args.approval_token]))
+    rendered = wrapper_write_intent(
+        args,
+        host,
+        "restart-service",
+        ["--service-name", service, "--approval-token", args.approval_token],
+        details={"host": args.host, "service": service},
+    )
+    return run_wrapper(args, host, "restart-service", rendered)
 
 
 def cmd_plan_config_batch(args: argparse.Namespace) -> int:
@@ -423,16 +479,18 @@ def cmd_apply_config_batch(args: argparse.Namespace) -> int:
     payload = json.loads(change_path.read_text(encoding="utf-8"))
     validate_approval(args.approval_token, {"host": payload["host"], "action": "apply-config-batch", "change_id": payload["change_id"]})
     fleet = load_fleet(args.fleet)
-    host = prepare_local_demo_host(host_config(fleet, payload["host"]))
+    host = prepare_local_demo_host({**host_config(fleet, payload["host"]), "host": payload["host"]})
     for key in [item["path"] for item in payload["sets"]] + payload["deletes"]:
         if not allowed_config_key(host, payload["file"], key):
             raise GuardedOpsError(f"config key is no longer allowed: {key}")
-    return run_wrapper(
+    rendered = wrapper_write_intent(
         args,
         host,
         "apply-config-batch",
-        append_run_id(args, ["--change-id", payload["change_id"], "--approval-token", args.approval_token, *batch_args(payload)]),
+        ["--change-id", payload["change_id"], "--approval-token", args.approval_token, *batch_args(payload)],
+        details={"host": payload["host"], "change_id": payload["change_id"], "file": payload["file"]},
     )
+    return run_wrapper(args, host, "apply-config-batch", rendered)
 
 
 def cmd_audit_status(args: argparse.Namespace) -> int:
@@ -604,16 +662,20 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["git"].add_argument("--remote", default="origin")
     sub.choices["git"].add_argument("--limit", type=int, default=5)
     sub.choices["git"].add_argument("--approval-token")
+    sub.choices["git"].add_argument("--operation-id")
     sub.choices["plan-config-batch"].add_argument("--file", required=True)
     sub.choices["plan-config-batch"].add_argument("--set", dest="set_exprs", action="append", default=[])
     sub.choices["plan-config-batch"].add_argument("--delete", dest="deletes", action="append", default=[])
     sub.choices["apply-config-batch"].add_argument("--change-id", required=True)
     sub.choices["apply-config-batch"].add_argument("--approval-token", required=True)
+    sub.choices["apply-config-batch"].add_argument("--operation-id")
     sub.choices["plan-deploy"].add_argument("--ref", required=True)
     sub.choices["deploy"].add_argument("--ref", required=True)
     sub.choices["deploy"].add_argument("--approval-token", required=True)
+    sub.choices["deploy"].add_argument("--operation-id")
     sub.choices["restart-service"].add_argument("--service")
     sub.choices["restart-service"].add_argument("--approval-token", required=True)
+    sub.choices["restart-service"].add_argument("--operation-id")
     sub.choices["install-wrapper"].add_argument("--wrapper-source", default="server/ops-wrapper")
     sub.choices["install-wrapper"].add_argument("--policy-source", default="server/policy.example.json")
     sub.choices["install-wrapper"].add_argument("--runtime-source", default="src/guarded_ops")

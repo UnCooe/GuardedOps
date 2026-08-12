@@ -10,6 +10,7 @@ from typing import Any
 
 from .audit import AuditFilters, emit_summary
 from .errors import GuardedOpsError
+from .reconciliation import emit_daily_evidence, emit_reconcile
 from .redaction import redact_text
 
 SECRET_RE = re.compile(r"(token|secret|password|api[_-]?key|authorization|cookie)", re.I)
@@ -125,6 +126,20 @@ def cmd_audit_summary(args: argparse.Namespace) -> int:
     return emit_summary(args.input, AuditFilters(host=args.host, run_id=args.run_id, since=args.since), args.output)
 
 
+def cmd_audit_reconcile(args: argparse.Namespace) -> int:
+    return emit_reconcile(
+        intent_path=args.intent,
+        audit_path=args.audit,
+        evidence_path=args.evidence,
+        filters=AuditFilters(host=args.host, run_id=args.run_id, since=args.since),
+        output=args.output,
+    )
+
+
+def cmd_daily_evidence(args: argparse.Namespace) -> int:
+    return emit_daily_evidence(args.input, args.output)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ops-review")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -146,6 +161,19 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--since")
     audit.add_argument("--output")
     audit.set_defaults(func=cmd_audit_summary)
+    reconcile = sub.add_parser("audit-reconcile")
+    reconcile.add_argument("--intent", required=True)
+    reconcile.add_argument("--audit", required=True)
+    reconcile.add_argument("--evidence")
+    reconcile.add_argument("--host")
+    reconcile.add_argument("--run-id")
+    reconcile.add_argument("--since")
+    reconcile.add_argument("--output")
+    reconcile.set_defaults(func=cmd_audit_reconcile)
+    daily = sub.add_parser("daily-evidence")
+    daily.add_argument("--input", required=True)
+    daily.add_argument("--output", required=True)
+    daily.set_defaults(func=cmd_daily_evidence)
     return parser
 
 
