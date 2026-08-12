@@ -13,3 +13,6 @@ class FleetError(GuardedOpsError):
 class PolicyError(GuardedOpsError):
     """Raised when wrapper policy blocks an action."""
 
+
+class AuditWriteError(GuardedOpsError):
+    """Raised when an audit event cannot be durably recorded."""

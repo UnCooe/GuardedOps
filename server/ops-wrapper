@@ -9,7 +9,7 @@ candidate_paths = [
     "/etc/guardedops-demo/src",
     "/etc/ops-wrapper/src",
 ]
-for candidate in candidate_paths:
+for candidate in reversed(candidate_paths):
     if candidate:
         sys.path.insert(0, candidate)
 

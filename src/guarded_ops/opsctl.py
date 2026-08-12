@@ -98,6 +98,13 @@ def run_wrapper(args: argparse.Namespace, host: dict[str, Any], action: str, act
     return run_json(wrapper_command(host, action, action_args), dry_run=args.dry_run)
 
 
+def append_run_id(args: argparse.Namespace, rendered: list[str]) -> list[str]:
+    run_id = getattr(args, "run_id", None)
+    if run_id:
+        return [*rendered, "--run-id", run_id]
+    return rendered
+
+
 def run_checked(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(command, cwd=cwd, check=False, text=True, capture_output=True)
     if completed.returncode != 0:
@@ -216,7 +223,7 @@ def cmd_init_demo(args: argparse.Namespace) -> int:
 def cmd_observe(args: argparse.Namespace) -> int:
     _, host = common_host(args)
     if host.get("transport"):
-        return run_wrapper(args, host, "host-observe")
+        return run_wrapper(args, host, "host-observe", append_run_id(args, []))
     app_path = resolve_app_path(args.fleet, host)
     logs_dir = app_path / "logs"
     return emit(
@@ -234,7 +241,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
     _, host = common_host(args)
     if host.get("transport"):
         log_path = str(Path(host["app_path"]) / "logs" / args.name)
-        return run_wrapper(args, host, "log-query", ["--path", log_path, "--lines", str(args.lines)])
+        return run_wrapper(args, host, "log-query", append_run_id(args, ["--path", log_path, "--lines", str(args.lines)]))
     app_path = resolve_app_path(args.fleet, host)
     log_path = app_path / "logs" / args.name
     if not log_path.exists():
@@ -339,7 +346,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         raise GuardedOpsError("deploy ref must be an exact hex commit SHA, 7 to 64 characters")
     validate_approval(args.approval_token, {"host": args.host, "action": "deploy", "ref": args.ref})
     if host.get("transport"):
-        return run_wrapper(args, host, "deploy-ref", ["--ref", args.ref, "--approval-token", args.approval_token])
+        return run_wrapper(args, host, "deploy-ref", append_run_id(args, ["--ref", args.ref, "--approval-token", args.approval_token]))
     if args.dry_run:
         return emit({"kind": "deploy-apply-plan", "host": args.host, "service": host["service"], "ref": args.ref, "dry_run": True})
     record = {"kind": "deploy-record", "host": args.host, "service": host["service"], "ref": args.ref, "deployed_at": utc_now()}
@@ -355,7 +362,7 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 def cmd_baseline(args: argparse.Namespace) -> int:
     _, host = common_host(args)
-    return run_wrapper(args, host, "runtime-baseline")
+    return run_wrapper(args, host, "runtime-baseline", append_run_id(args, []))
 
 
 def cmd_git(args: argparse.Namespace) -> int:
@@ -377,7 +384,7 @@ def cmd_git(args: argparse.Namespace) -> int:
             rendered.extend(["--ref", args.ref])
     if args.limit is not None:
         rendered.extend(["--limit", str(args.limit)])
-    return run_wrapper(args, host, "safe-git", rendered)
+    return run_wrapper(args, host, "safe-git", append_run_id(args, rendered))
 
 
 def cmd_restart_service(args: argparse.Namespace) -> int:
@@ -386,7 +393,7 @@ def cmd_restart_service(args: argparse.Namespace) -> int:
     if service != host["service"]:
         raise GuardedOpsError(f"service is not allowed for host {args.host}: {service}")
     validate_approval(args.approval_token, {"host": args.host, "action": "restart-service", "service": service})
-    return run_wrapper(args, host, "restart-service", ["--service-name", service, "--approval-token", args.approval_token])
+    return run_wrapper(args, host, "restart-service", append_run_id(args, ["--service-name", service, "--approval-token", args.approval_token]))
 
 
 def cmd_plan_config_batch(args: argparse.Namespace) -> int:
@@ -405,7 +412,7 @@ def cmd_plan_config_batch(args: argparse.Namespace) -> int:
     if not args.dry_run:
         (changes_dir() / f"{payload['change_id']}.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     display = redacted_batch_payload(payload)
-    preview_cmd = wrapper_command(host, "plan-config-batch", batch_args(display))
+    preview_cmd = wrapper_command(host, "plan-config-batch", append_run_id(args, batch_args(display)))
     return emit({**display, "approval": approval_hint({"host": args.host, "action": "apply-config-batch", "change_id": payload["change_id"]}), "remote_command": preview_cmd, "path": None if args.dry_run else str(changes_dir() / f"{payload['change_id']}.json")})
 
 
@@ -420,7 +427,24 @@ def cmd_apply_config_batch(args: argparse.Namespace) -> int:
     for key in [item["path"] for item in payload["sets"]] + payload["deletes"]:
         if not allowed_config_key(host, payload["file"], key):
             raise GuardedOpsError(f"config key is no longer allowed: {key}")
-    return run_wrapper(args, host, "apply-config-batch", ["--change-id", payload["change_id"], "--approval-token", args.approval_token, *batch_args(payload)])
+    return run_wrapper(
+        args,
+        host,
+        "apply-config-batch",
+        append_run_id(args, ["--change-id", payload["change_id"], "--approval-token", args.approval_token, *batch_args(payload)]),
+    )
+
+
+def cmd_audit_status(args: argparse.Namespace) -> int:
+    _, host = common_host(args)
+    rendered: list[str] = []
+    if args.host_filter:
+        rendered.extend(["--host", args.host_filter])
+    if args.run_id:
+        rendered.extend(["--run-id", args.run_id])
+    if args.since:
+        rendered.extend(["--since", args.since])
+    return run_wrapper(args, host, "audit-summary", rendered)
 
 
 def cmd_install_wrapper(args: argparse.Namespace) -> int:
@@ -560,6 +584,7 @@ def build_parser() -> argparse.ArgumentParser:
         "install-wrapper": cmd_install_wrapper,
         "init-ssh-demo": cmd_init_ssh_demo,
         "rollback": cmd_rollback,
+        "audit-status": cmd_audit_status,
     }.items():
         cmd = sub.add_parser(name)
         cmd.set_defaults(func=func)
@@ -597,6 +622,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["rollback"].add_argument("--host", required=True)
     sub.choices["rollback"].add_argument("--rollback-id", required=True)
     sub.choices["rollback"].add_argument("--approval-token", required=True)
+    for name in ("observe", "logs", "baseline", "git", "plan-config-batch", "apply-config-batch", "deploy", "restart-service"):
+        sub.choices[name].add_argument("--run-id")
+    sub.choices["audit-status"].add_argument("--run-id")
+    sub.choices["audit-status"].add_argument("--host-filter", dest="host_filter")
+    sub.choices["audit-status"].add_argument("--since")
     return parser
 
 

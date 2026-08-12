@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .audit import AuditFilters, emit_summary
 from .errors import GuardedOpsError
 from .redaction import redact_text
 
@@ -120,6 +121,10 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_summary(args: argparse.Namespace) -> int:
+    return emit_summary(args.input, AuditFilters(host=args.host, run_id=args.run_id, since=args.since), args.output)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ops-review")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -134,6 +139,13 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report")
     report.add_argument("--output", default=str(Path(".guarded_ops") / "review"))
     report.set_defaults(func=cmd_report)
+    audit = sub.add_parser("audit-summary")
+    audit.add_argument("--input", required=True)
+    audit.add_argument("--host")
+    audit.add_argument("--run-id")
+    audit.add_argument("--since")
+    audit.add_argument("--output")
+    audit.set_defaults(func=cmd_audit_summary)
     return parser
 
 

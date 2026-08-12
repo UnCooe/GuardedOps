@@ -13,8 +13,9 @@ from pathlib import Path
 
 from . import __version__
 from .approval import validate_approval
+from .audit import AuditFilters, append_event, default_run_id, emit_summary, event_payload, new_operation_id
 from .config_patch import parse_batch_set_expr, parse_set_expr, patch_config_text, read_env, set_env_value, write_env
-from .errors import GuardedOpsError, PolicyError
+from .errors import AuditWriteError, GuardedOpsError, PolicyError
 from .policy import action_policy, load_policy
 from .redaction import redact_text
 
@@ -32,15 +33,81 @@ def emit(payload: dict) -> int:
     return 0
 
 
-def audit(policy: dict, action: str, payload: dict) -> None:
-    audit_path = policy.get("audit_log")
-    if not audit_path:
+def audit_metadata(policy: dict, args: argparse.Namespace, action: str, operation_kind: str, operation_id: str | None = None) -> dict:
+    version = version_payload(policy)
+    return {
+        "operation_id": operation_id or new_operation_id(action),
+        "run_id": getattr(args, "run_id", None) or default_run_id(),
+        "host": host_id(policy),
+        "action": action,
+        "operation_kind": operation_kind,
+        "wrapper_version": str(version.get("version") or __version__),
+        "policy_version": str(policy.get("policy_version") or version.get("policy_version") or "unknown"),
+    }
+
+
+def audit_start(policy: dict, args: argparse.Namespace, action: str, operation_kind: str, details: dict | None = None) -> dict:
+    meta = audit_metadata(policy, args, action, operation_kind)
+    event = event_payload(**meta, phase="start", status="started", details=details)
+    try:
+        append_event(policy.get("audit_log"), event)
+    except AuditWriteError as exc:
+        raise AuditWriteError(f"audit start append failed; side effects blocked: {exc}") from exc
+    return meta
+
+
+def audit_result(
+    policy: dict,
+    args: argparse.Namespace,
+    action: str,
+    operation_kind: str,
+    status: str,
+    *,
+    operation_id: str | None = None,
+    meta: dict | None = None,
+    reason_code: str | None = None,
+    details: dict | None = None,
+    terminal: bool = False,
+) -> None:
+    metadata = meta or audit_metadata(policy, args, action, operation_kind, operation_id)
+    event = event_payload(**metadata, phase="result", status=status, reason_code=reason_code, details=details)
+    try:
+        append_event(policy.get("audit_log"), event)
+    except AuditWriteError as exc:
+        if terminal:
+            raise AuditWriteError(
+                "audit terminal append failed; no-auto-retry; manual-verification required: " + str(exc)
+            ) from exc
+        raise
+
+
+def operation_kind_for_args(args: argparse.Namespace) -> str | None:
+    action = getattr(args, "action", None)
+    if action in {"apply-config-batch", "deploy-ref", "restart-service"}:
+        return "write"
+    if action == "safe-git":
+        return "write" if getattr(args, "op", None) in {"fetch", "checkout"} else "read"
+    if action == "config-patch":
+        return "read" if getattr(args, "dry_run", False) else "write"
+    if action in {"host-observe", "log-query", "runtime-baseline", "plan-config-batch"}:
+        return "read"
+    return None
+
+
+def audit_policy_denial(policy: dict, args: argparse.Namespace) -> None:
+    kind = operation_kind_for_args(args)
+    action = getattr(args, "action", None)
+    if not action or not kind:
         return
-    path = Path(audit_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    event = {"time": utc_now(), "action": action, **payload}
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
+    audit_result(
+        policy,
+        args,
+        action,
+        kind,
+        "failed",
+        reason_code="policy_denied",
+        details={"decision": "blocked"},
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -182,7 +249,7 @@ def cmd_host_observe(policy: dict, _args: argparse.Namespace) -> int:
         "app_exists": root.exists(),
         "service_status": service_status(policy),
     }
-    audit(policy, "host-observe", {"result": "ok"})
+    audit_result(policy, _args, "host-observe", "read", "success")
     return emit(payload)
 
 
@@ -197,7 +264,7 @@ def cmd_log_query(policy: dict, args: argparse.Namespace) -> int:
     if not target.exists():
         raise PolicyError(f"log path not found: {target}")
     output = "\n".join(target.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
-    audit(policy, "log-query", {"path": str(target), "lines": lines})
+    audit_result(policy, args, "log-query", "read", "success", details={"path": str(target), "lines": lines})
     return emit({"path": str(target), "output": redact_text(output)})
 
 
@@ -207,7 +274,7 @@ def cmd_runtime_baseline(policy: dict, _args: argparse.Namespace) -> int:
     files = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()) if root.exists() else []
     git_head = completed_summary(["git", "rev-parse", "HEAD"], cwd=root) if root.exists() else {"returncode": 1}
     git_status = completed_summary(["git", "status", "--short", "--branch", "--untracked-files=no"], cwd=root) if root.exists() else {"returncode": 1}
-    audit(policy, "runtime-baseline", {"file_count": len(files)})
+    audit_result(policy, _args, "runtime-baseline", "read", "success")
     return emit(
         {
             "app_path": str(root),
@@ -236,7 +303,7 @@ def cmd_config_patch(policy: dict, args: argparse.Namespace) -> int:
         raise PolicyError(f"config key is not allowed: {key}")
     target = Path(policy["app_path"]) / args.file
     if args.dry_run:
-        audit(policy, "config-patch", {"file": args.file, "key": key, "dry_run": True})
+        audit_result(policy, args, "config-patch", "read", "success", details={"file": args.file, "key": key, "dry_run": True})
         return emit({"action": "config-patch", "file": args.file, "key": key, "target": str(target), "dry_run": True})
     raise PolicyError("config-patch write is disabled; use apply-config-batch with approval")
 
@@ -256,7 +323,14 @@ def cmd_plan_config_batch(policy: dict, args: argparse.Namespace) -> int:
         raise PolicyError(str(exc)) from exc
     diff = [redact_text(line) for line in difflib.unified_diff(old_text.splitlines(), new_text.splitlines(), fromfile=args.file + ":current", tofile=args.file + ":planned", lineterm="")]
     change_id = hashlib.sha256(json.dumps({"file": args.file, "sets": sets, "deletes": deletes}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
-    audit(policy, "plan-config-batch", {"file": args.file, "changed": sorted(changed), "change_id": change_id})
+    audit_result(
+        policy,
+        args,
+        "plan-config-batch",
+        "read",
+        "success",
+        details={"file": args.file, "changed": sorted(changed), "change_id": change_id},
+    )
     return emit({"action": "plan-config-batch", "file": args.file, "change_id": change_id, "changed": sorted(changed), "diff": diff[:200]})
 
 
@@ -275,14 +349,44 @@ def cmd_apply_config_batch(policy: dict, args: argparse.Namespace) -> int:
         new_text, changed = patch_config_text(args.file, old_text, sets, deletes)
     except (ValueError, json.JSONDecodeError) as exc:
         raise PolicyError(str(exc)) from exc
-    backup_dir = Path(policy.get("backup_dir") or ".guarded_ops/backups")
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / f"{target.name}.{utc_now().replace(':', '').replace('+00:00', 'Z')}.{hashlib.sha256(old_text.encode()).hexdigest()[:12]}.bak"
-    if target.exists():
-        shutil.copy2(target, backup_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(new_text, encoding="utf-8")
-    audit(policy, "apply-config-batch", {"file": args.file, "changed": sorted(changed), "change_id": args.change_id, "backup": str(backup_path)})
+    meta = audit_start(
+        policy,
+        args,
+        "apply-config-batch",
+        "write",
+        details={"file": args.file, "change_id": args.change_id},
+    )
+    backup_path = Path(policy.get("backup_dir") or ".guarded_ops/backups") / f"{target.name}.{utc_now().replace(':', '').replace('+00:00', 'Z')}.{hashlib.sha256(old_text.encode()).hexdigest()[:12]}.bak"
+    try:
+        backup_dir = Path(policy.get("backup_dir") or ".guarded_ops/backups")
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            shutil.copy2(target, backup_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(new_text, encoding="utf-8")
+    except Exception as exc:
+        audit_result(
+            policy,
+            args,
+            "apply-config-batch",
+            "write",
+            "failed",
+            meta=meta,
+            reason_code="execution_failed",
+            details={"file": args.file, "change_id": args.change_id},
+            terminal=True,
+        )
+        raise GuardedOpsError(str(exc)) from exc
+    audit_result(
+        policy,
+        args,
+        "apply-config-batch",
+        "write",
+        "success",
+        meta=meta,
+        details={"file": args.file, "changed": sorted(changed), "change_id": args.change_id, "backup": str(backup_path)},
+        terminal=True,
+    )
     return emit({"action": "apply-config-batch", "file": args.file, "change_id": args.change_id, "changed": sorted(changed), "backup": str(backup_path), "applied": True})
 
 
@@ -316,9 +420,37 @@ def cmd_safe_git(policy: dict, args: argparse.Namespace) -> int:
         command.extend(["checkout", "--detach", commit])
     else:
         raise PolicyError(f"git op is not allowed: {args.op}")
-    completed = subprocess.run(command, check=False, text=True, capture_output=True)
-    audit(policy, "safe-git", {"op": args.op, "returncode": completed.returncode})
-    return emit({"op": args.op, "returncode": completed.returncode, "stdout": redact_text(completed.stdout), "stderr": redact_text(completed.stderr)})
+    kind = "write" if args.op in {"fetch", "checkout"} else "read"
+    meta = audit_start(policy, args, "safe-git", "write", details={"op": args.op}) if kind == "write" else None
+    try:
+        completed = subprocess.run(command, check=False, text=True, capture_output=True)
+    except Exception as exc:
+        audit_result(
+            policy,
+            args,
+            "safe-git",
+            kind,
+            "failed",
+            meta=meta,
+            reason_code="execution_failed",
+            details={"op": args.op},
+            terminal=kind == "write",
+        )
+        raise GuardedOpsError(str(exc)) from exc
+    status = "success" if completed.returncode == 0 else "failed"
+    audit_result(
+        policy,
+        args,
+        "safe-git",
+        kind,
+        status,
+        meta=meta,
+        reason_code=None if completed.returncode == 0 else "command_failed",
+        details={"op": args.op, "returncode": completed.returncode},
+        terminal=kind == "write",
+    )
+    emit({"op": args.op, "returncode": completed.returncode, "stdout": redact_text(completed.stdout), "stderr": redact_text(completed.stderr)})
+    return 0 if completed.returncode == 0 else 2
 
 
 def re_match(pattern: str, value: str) -> bool:
@@ -333,18 +465,84 @@ def cmd_deploy_ref(policy: dict, args: argparse.Namespace) -> int:
     commit = resolve_exact_commit(repo, args.ref)
     require_approval(policy, args.approval_token, {"action": "deploy", "ref": args.ref})
     before = completed_summary(["git", "rev-parse", "HEAD"], cwd=repo)
-    checkout = completed_summary(["git", "checkout", "--detach", commit], cwd=repo)
-    after = completed_summary(["git", "rev-parse", "HEAD"], cwd=repo)
-    audit(policy, "deploy-ref", {"ref": args.ref, "returncode": checkout["returncode"]})
-    return emit({"action": "deploy-ref", "ref": args.ref, "before": before, "checkout": checkout, "after": after})
+    meta = audit_start(policy, args, "deploy-ref", "write", details={"ref": args.ref})
+    try:
+        checkout = completed_summary(["git", "checkout", "--detach", commit], cwd=repo)
+        after = completed_summary(["git", "rev-parse", "HEAD"], cwd=repo)
+    except Exception as exc:
+        audit_result(
+            policy,
+            args,
+            "deploy-ref",
+            "write",
+            "failed",
+            meta=meta,
+            reason_code="execution_failed",
+            details={"ref": args.ref},
+            terminal=True,
+        )
+        raise GuardedOpsError(str(exc)) from exc
+    audit_result(
+        policy,
+        args,
+        "deploy-ref",
+        "write",
+        "success" if checkout["returncode"] == 0 else "failed",
+        meta=meta,
+        reason_code=None if checkout["returncode"] == 0 else "command_failed",
+        details={"ref": args.ref, "returncode": checkout["returncode"]},
+        terminal=True,
+    )
+    emit({"action": "deploy-ref", "ref": args.ref, "before": before, "checkout": checkout, "after": after})
+    return 0 if checkout["returncode"] == 0 else 2
 
 
 def cmd_restart_service(policy: dict, args: argparse.Namespace) -> int:
     action_policy(policy, "restart-service")
     require_approval(policy, args.approval_token, {"action": "restart-service", "service": args.service_name})
-    result = restart_service(policy, args.service_name)
-    audit(policy, "restart-service", {"service": args.service_name, "returncode": result["returncode"]})
-    return emit({"action": "restart-service", "service": args.service_name, **result})
+    expected = policy.get("service")
+    if args.service_name != expected:
+        raise PolicyError(f"service is not allowed: {args.service_name}")
+    meta = audit_start(policy, args, "restart-service", "write", details={"service": args.service_name})
+    try:
+        result = restart_service(policy, args.service_name)
+    except Exception as exc:
+        audit_result(
+            policy,
+            args,
+            "restart-service",
+            "write",
+            "failed",
+            meta=meta,
+            reason_code="execution_failed",
+            details={"service": args.service_name},
+            terminal=True,
+        )
+        raise GuardedOpsError(str(exc)) from exc
+    audit_result(
+        policy,
+        args,
+        "restart-service",
+        "write",
+        "success" if result["returncode"] == 0 else "failed",
+        meta=meta,
+        reason_code=None if result["returncode"] == 0 else "command_failed",
+        details={"service": args.service_name, "returncode": result["returncode"]},
+        terminal=True,
+    )
+    emit({"action": "restart-service", "service": args.service_name, **result})
+    return 0 if result["returncode"] == 0 else 2
+
+
+def cmd_audit_summary(policy: dict, args: argparse.Namespace) -> int:
+    audit_log = policy.get("audit_log")
+    if not audit_log:
+        raise GuardedOpsError("policy does not define audit_log")
+    return emit_summary(audit_log, AuditFilters(host=args.host, run_id=args.run_id, since=args.since))
+
+
+def add_run_id(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--run-id")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -357,23 +555,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("version").set_defaults(func=cmd_version)
-    sub.add_parser("host-observe").set_defaults(func=cmd_host_observe)
+    host_observe = sub.add_parser("host-observe")
+    add_run_id(host_observe)
+    host_observe.set_defaults(func=cmd_host_observe)
     log = sub.add_parser("log-query")
+    add_run_id(log)
     log.add_argument("--path", required=True)
     log.add_argument("--lines", type=int, default=80)
     log.set_defaults(func=cmd_log_query)
-    sub.add_parser("runtime-baseline").set_defaults(func=cmd_runtime_baseline)
+    runtime = sub.add_parser("runtime-baseline")
+    add_run_id(runtime)
+    runtime.set_defaults(func=cmd_runtime_baseline)
     config = sub.add_parser("config-patch")
+    add_run_id(config)
     config.add_argument("--file", required=True)
     config.add_argument("--set", dest="set_expr", required=True)
     config.add_argument("--dry-run", action="store_true")
     config.set_defaults(func=cmd_config_patch)
     config_batch = sub.add_parser("plan-config-batch")
+    add_run_id(config_batch)
     config_batch.add_argument("--file", required=True)
     config_batch.add_argument("--set", dest="set_exprs", action="append", default=[])
     config_batch.add_argument("--delete", dest="deletes", action="append", default=[])
     config_batch.set_defaults(func=cmd_plan_config_batch)
     apply_batch = sub.add_parser("apply-config-batch")
+    add_run_id(apply_batch)
     apply_batch.add_argument("--change-id", required=True)
     apply_batch.add_argument("--approval-token", required=True)
     apply_batch.add_argument("--file", required=True)
@@ -381,6 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply_batch.add_argument("--delete", dest="deletes", action="append", default=[])
     apply_batch.set_defaults(func=cmd_apply_config_batch)
     git = sub.add_parser("safe-git")
+    add_run_id(git)
     git.add_argument("--op", required=True, choices=["status", "rev-parse", "log", "fetch", "checkout"])
     git.add_argument("--ref")
     git.add_argument("--remote", default="origin")
@@ -388,19 +595,27 @@ def build_parser() -> argparse.ArgumentParser:
     git.add_argument("--approval-token")
     git.set_defaults(func=cmd_safe_git)
     deploy = sub.add_parser("deploy-ref")
+    add_run_id(deploy)
     deploy.add_argument("--ref", required=True)
     deploy.add_argument("--approval-token", required=True)
     deploy.set_defaults(func=cmd_deploy_ref)
     restart = sub.add_parser("restart-service")
+    add_run_id(restart)
     restart.add_argument("--service-name", required=True)
     restart.add_argument("--approval-token", required=True)
     restart.set_defaults(func=cmd_restart_service)
+    summary = sub.add_parser("audit-summary")
+    summary.add_argument("--host")
+    summary.add_argument("--run-id")
+    summary.add_argument("--since")
+    summary.set_defaults(func=cmd_audit_summary)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    policy = None
     try:
         policy_path = Path(args.policy)
         if policy_path not in TRUSTED_POLICY_PATHS and not args.allow_untrusted_policy:
@@ -411,6 +626,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         policy = load_policy(args.policy)
         return args.func(policy, args)
+    except AuditWriteError as exc:
+        print(f"ops-wrapper: {exc}", file=sys.stderr)
+        return 2
+    except PolicyError as exc:
+        if policy is not None:
+            try:
+                audit_policy_denial(policy, args)
+            except AuditWriteError as audit_exc:
+                print(f"ops-wrapper: policy denial audit skipped: {audit_exc}", file=sys.stderr)
+        print(f"ops-wrapper: {exc}", file=sys.stderr)
+        return 2
     except (GuardedOpsError, OSError) as exc:
         print(f"ops-wrapper: {exc}", file=sys.stderr)
         return 2

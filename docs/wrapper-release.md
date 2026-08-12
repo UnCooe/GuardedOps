@@ -12,6 +12,7 @@ python server/ops-wrapper --policy server/policy.example.json log-query \
   --path examples/mock-app/logs/current.log --lines 20
 python server/ops-wrapper --policy server/policy.example.json config-patch \
   --file config/app.env --set APP_LOG_LEVEL=debug --dry-run
+python server/ops-wrapper --policy server/policy.example.json audit-summary
 ```
 
 Do not adapt `sudoers.example` blindly. It is a minimal example showing the
@@ -20,3 +21,13 @@ expected command shape only.
 When running the wrapper with elevated privileges, keep the policy path fixed
 to a root-owned file. The `--allow-untrusted-policy` flag exists only for local
 tests and must not be included in privileged sudoers rules.
+
+The wrapper writes `guardedops.audit/v1` JSON Lines for audited read and write
+operations. Write operations fail closed: if the start record cannot be durably
+appended, no backup, config, git, or service side effect is attempted. If the
+terminal result cannot be appended after execution, the wrapper exits `2` and
+prints a no-auto-retry/manual-verification message.
+
+`version` and `audit-summary` do not emit audit records. See
+`docs/audit-contract.md` for the exact fields, summary verdicts, exit codes,
+redaction limits, and compatibility behavior.

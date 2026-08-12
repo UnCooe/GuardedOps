@@ -19,6 +19,7 @@ install-wrapper
 -> apply-config-batch
 -> restart-service
 -> logs / runtime-baseline verification
+-> audit-status verification
 -> rollback when needed
 ```
 
@@ -43,6 +44,7 @@ The local demo must prove:
 - config apply writes a backup and audit record
 - restart affects only the configured demo service
 - logs and baseline return structured, redacted output
+- audit-status reports complete evidence for the run
 
 ## Server Sandbox
 
@@ -90,6 +92,7 @@ opsctl apply-config-batch --change-id <change-id> \
 opsctl restart-service --host demo-local \
   --approval-token "host=demo-local action=restart-service service=guardedops-demo"
 opsctl logs --host demo-local --name current.log
+opsctl audit-status --host demo-local --run-id <run-id>
 ```
 
 Representative SSH sandbox bootstrap:
@@ -101,4 +104,9 @@ opsctl --dry-run init-ssh-demo --host demo-ssh --reset
 opsctl init-ssh-demo --host demo-ssh --reset
 opsctl restart-service --host demo-ssh \
   --approval-token "host=demo-ssh action=restart-service service=guardedops_demo"
+opsctl audit-status --host demo-ssh --run-id <run-id>
 ```
+
+Audit verification uses the shared summary contract in `docs/audit-contract.md`.
+Exit `0` means the evidence is complete; exit `3` means partial evidence needs
+review; exit `2` means the source or transport was insufficient.
