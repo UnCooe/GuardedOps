@@ -13,10 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import __version__
+from .audit import append_event, default_run_id, event_payload, new_operation_id
 from .approval import approval_hint, validate_approval
 from .config_patch import parse_batch_set_expr, parse_set_expr, read_env, set_env_value, write_env
-from .audit import default_run_id, new_operation_id
-from .errors import GuardedOpsError
+from .errors import AuditWriteError, GuardedOpsError
 from .fleet import allowed_config_key, host_config, load_fleet, resolve_app_path
 from .intent import append_intent, intent_payload
 from .redaction import redact_value
@@ -134,6 +135,248 @@ def wrapper_write_intent(
             ),
         )
     return rendered_with_ids
+
+
+def opsctl_write_audit_meta(args: argparse.Namespace, host: dict[str, Any], action: str) -> dict[str, str]:
+    return {
+        "operation_id": getattr(args, "operation_id", None) or new_operation_id(action),
+        "run_id": getattr(args, "run_id", None) or default_run_id(),
+        "host": str(host.get("host") or getattr(args, "host", None) or "unknown"),
+        "action": action,
+        "operation_kind": "write",
+        "wrapper_version": __version__,
+        "policy_version": "opsctl",
+    }
+
+
+def append_opsctl_audit(path: Path, meta: dict[str, str], phase: str, status: str, *, reason_code: str | None = None, details: dict[str, Any] | None = None, terminal: bool = False) -> None:
+    event = event_payload(**meta, phase=phase, status=status, reason_code=reason_code, details=details)
+    try:
+        append_event(path, event)
+    except AuditWriteError as exc:
+        if terminal:
+            raise GuardedOpsError("install-wrapper terminal audit append failed; no-auto-retry; manual-verification required: " + str(exc)) from exc
+        raise GuardedOpsError(f"install-wrapper audit start append failed; side effects blocked: {exc}") from exc
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tree_fingerprint(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"exists": False, "kind": "missing", "sha256": None, "file_count": 0}
+    if path.is_file():
+        return {"exists": True, "kind": "file", "sha256": sha256_file(path), "file_count": 1}
+    if path.is_dir():
+        digest = hashlib.sha256()
+        count = 0
+        for item in sorted(child for child in path.rglob("*") if child.is_file()):
+            rel = item.relative_to(path).as_posix()
+            digest.update(rel.encode("utf-8") + b"\0")
+            digest.update(sha256_file(item).encode("ascii") + b"\0")
+            count += 1
+        return {"exists": True, "kind": "directory", "sha256": digest.hexdigest(), "file_count": count}
+    return {"exists": True, "kind": "other", "sha256": None, "file_count": 0}
+
+
+def manifest_sha(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def install_audit_log() -> Path:
+    return state_root() / "install" / "audit.jsonl"
+
+
+def install_backup_id(meta: dict[str, str]) -> str:
+    return f"{meta['run_id']}-{meta['operation_id']}".replace("/", "_")
+
+
+def install_candidate_manifest(wrapper_source: Path, generated_policy: Path, runtime_source: Path) -> dict[str, Any]:
+    files = {
+        "ops-wrapper": sha256_file(wrapper_source),
+        "policy.json": sha256_file(generated_policy),
+    }
+    for item in sorted(child for child in runtime_source.rglob("*") if child.is_file()):
+        files["runtime/guarded_ops/" + item.relative_to(runtime_source).as_posix()] = sha256_file(item)
+    manifest = {"schema_version": "guardedops.install-candidate/v1", "files": files}
+    manifest["sha256"] = manifest_sha(manifest)
+    return manifest
+
+
+def install_candidate_archive(wrapper_source: Path, generated_policy: Path, runtime_source: Path, manifest: dict[str, Any], work_dir: Path) -> Path:
+    candidate_root = work_dir / "candidate"
+    if candidate_root.exists():
+        shutil.rmtree(candidate_root)
+    (candidate_root / "runtime" / "guarded_ops").mkdir(parents=True)
+    shutil.copy2(wrapper_source, candidate_root / "ops-wrapper")
+    shutil.copy2(generated_policy, candidate_root / "policy.json")
+    shutil.copytree(runtime_source, candidate_root / "runtime" / "guarded_ops", dirs_exist_ok=True)
+    (candidate_root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    archive_path = work_dir / "candidate.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for item in sorted(candidate_root.rglob("*")):
+            archive.add(item, arcname=item.relative_to(candidate_root).as_posix())
+    return archive_path
+
+
+def install_paths(host: dict[str, Any], policy_data: dict[str, Any]) -> dict[str, str]:
+    policy_path = str(host["policy_path"])
+    return {
+        "wrapper": str(host["server_wrapper"]),
+        "policy": policy_path,
+        "runtime": str(Path(policy_path).parent / "src" / "guarded_ops"),
+        "runtime_dir": str(Path(policy_path).parent / "src"),
+        "backup_root": str(policy_data["backup_dir"]),
+    }
+
+
+def install_audit_details(paths: dict[str, str], backup_id: str, **extra: Any) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "wrapper": paths["wrapper"],
+        "policy": paths["policy"],
+        "runtime_dir": paths["runtime_dir"],
+        "backup_id": backup_id,
+    }
+    details.update({key: value for key, value in extra.items() if isinstance(value, str)})
+    return details
+
+
+def local_backup_manifest(paths: dict[str, str], backup_id: str) -> dict[str, Any]:
+    backup_dir = Path(paths["backup_root"]) / backup_id
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    before = {
+        "wrapper": tree_fingerprint(Path(paths["wrapper"])),
+        "policy": tree_fingerprint(Path(paths["policy"])),
+        "runtime": tree_fingerprint(Path(paths["runtime"])),
+    }
+    for label in ("wrapper", "policy", "runtime"):
+        target = Path(paths[label])
+        if not target.exists():
+            continue
+        if target.is_dir():
+            shutil.copytree(target, backup_dir / label)
+        else:
+            shutil.copy2(target, backup_dir / label)
+    manifest = {"schema_version": "guardedops.install-backup/v1", "backup_id": backup_id, "before": before}
+    manifest["sha256"] = manifest_sha(manifest)
+    (backup_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return manifest
+
+
+def install_after_manifest(paths: dict[str, str]) -> dict[str, Any]:
+    return {
+        "wrapper": tree_fingerprint(Path(paths["wrapper"])),
+        "policy": tree_fingerprint(Path(paths["policy"])),
+        "runtime": tree_fingerprint(Path(paths["runtime"])),
+    }
+
+
+def remote_install_script(mode: str, payload: dict[str, str]) -> str:
+    script = r'''
+import hashlib, json, shutil, sys, tarfile, tempfile
+from pathlib import Path
+payload = json.loads(sys.argv[1])
+mode = sys.argv[2]
+def sha256_file(path):
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+def fingerprint(path):
+    path = Path(path)
+    if not path.exists():
+        return {"exists": False, "kind": "missing", "sha256": None, "file_count": 0}
+    if path.is_file():
+        return {"exists": True, "kind": "file", "sha256": sha256_file(path), "file_count": 1}
+    if path.is_dir():
+        h = hashlib.sha256(); count = 0
+        for item in sorted(child for child in path.rglob("*") if child.is_file()):
+            h.update(item.relative_to(path).as_posix().encode() + b"\0")
+            h.update(sha256_file(item).encode() + b"\0")
+            count += 1
+        return {"exists": True, "kind": "directory", "sha256": h.hexdigest(), "file_count": count}
+    return {"exists": True, "kind": "other", "sha256": None, "file_count": 0}
+def manifest_sha(data):
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+def safe_extract(archive_path, target_dir):
+    root = target_dir.resolve()
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            target = (target_dir / member.name).resolve()
+            if target != root and root not in target.parents:
+                raise RuntimeError("candidate path escapes install directory")
+        archive.extractall(target_dir)
+targets = {"wrapper": payload["wrapper"], "policy": payload["policy"], "runtime": payload["runtime"]}
+if mode == "backup":
+    backup_dir = Path(payload["backup_root"]) / payload["backup_id"]
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    before = {label: fingerprint(path) for label, path in targets.items()}
+    for label, raw in targets.items():
+        path = Path(raw)
+        if not path.exists():
+            continue
+        if path.is_dir():
+            shutil.copytree(path, backup_dir / label)
+        else:
+            shutil.copy2(path, backup_dir / label)
+    manifest = {"schema_version": "guardedops.install-backup/v1", "backup_id": payload["backup_id"], "before": before}
+    manifest["sha256"] = manifest_sha(manifest)
+    (backup_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(manifest, sort_keys=True))
+else:
+    install_root = Path(payload["policy"]).parent
+    install_root.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix="guardedops-install-", dir=str(install_root)))
+    try:
+        archive_path = tmp / "candidate.tar.gz"
+        with archive_path.open("wb") as handle:
+            while True:
+                chunk = sys.stdin.buffer.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+        candidate = tmp / "candidate"
+        candidate.mkdir()
+        safe_extract(archive_path, candidate)
+        candidate_manifest = json.loads((candidate / "manifest.json").read_text())
+        if candidate_manifest.get("sha256") != payload["candidate_manifest_sha"]:
+            raise RuntimeError("candidate manifest sha mismatch")
+        Path(payload["wrapper"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(payload["policy"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(payload["runtime"]).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(candidate / "ops-wrapper", payload["wrapper"])
+        shutil.copy2(candidate / "policy.json", payload["policy"])
+        runtime = Path(payload["runtime"])
+        if runtime.exists():
+            shutil.rmtree(runtime)
+        shutil.copytree(candidate / "runtime" / "guarded_ops", runtime)
+        after = {label: fingerprint(path) for label, path in targets.items()}
+        print(json.dumps({"sha256": manifest_sha(after), "after": after}, sort_keys=True))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+'''
+    return "python3 -c " + shlex.quote(script) + " " + shlex.quote(json.dumps(payload, sort_keys=True)) + " " + shlex.quote(mode)
+
+
+def run_remote_json(host: dict[str, Any], command_text: str, input_bytes: bytes | None = None) -> dict[str, Any]:
+    completed = subprocess.run(["ssh", host["ssh_alias"], "--", command_text], input=input_bytes, check=False, capture_output=True)
+    if completed.stderr:
+        print(completed.stderr.decode("utf-8", errors="replace"), end="", file=sys.stderr)
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+        raise GuardedOpsError(stderr or stdout or "remote command failed")
+    try:
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        return json.loads(stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise GuardedOpsError("remote command returned invalid JSON") from exc
 
 
 def run_checked(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -526,36 +769,57 @@ def cmd_install_wrapper(args: argparse.Namespace) -> int:
     generated_policy = state_root() / "install" / f"{args.host}-policy.json"
     generated_policy.parent.mkdir(parents=True, exist_ok=True)
     generated_policy.write_text(json.dumps(policy_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths = install_paths(host, policy_data)
+    candidate_manifest = install_candidate_manifest(Path(args.wrapper_source), generated_policy, runtime_source)
+    candidate_archive = install_candidate_archive(Path(args.wrapper_source), generated_policy, runtime_source, candidate_manifest, state_root() / "install" / f"{args.host}-candidate")
+    meta = opsctl_write_audit_meta(args, host, "install-wrapper")
+    backup_id = install_backup_id(meta)
+    details = install_audit_details(paths, backup_id, candidate_manifest_sha=candidate_manifest["sha256"])
     if host.get("transport") == "ssh":
         wrapper_path = host["server_wrapper"]
         policy_path = host["policy_path"]
         runtime_dir = str(Path(policy_path).parent / "src")
+        remote_manifest_payload = {**paths, "backup_id": backup_id, "candidate_manifest_sha": candidate_manifest["sha256"]}
         commands = [
-            ["ssh", host["ssh_alias"], "--", "mkdir", "-p", str(Path(policy_path).parent), runtime_dir],
-            ["scp", args.wrapper_source, f"{host['ssh_alias']}:{wrapper_path}"],
-            ["scp", str(generated_policy), f"{host['ssh_alias']}:{policy_path}"],
-            ["scp", "-r", str(runtime_source), f"{host['ssh_alias']}:{runtime_dir}/"],
+            ["ssh", host["ssh_alias"], "--", remote_install_script("backup", remote_manifest_payload)],
+            ["ssh", host["ssh_alias"], "--", remote_install_script("install", remote_manifest_payload), "<", str(candidate_archive)],
         ]
         if args.dry_run:
-            return emit({"kind": "install-wrapper-plan", "host": args.host, "commands": commands, "wrapper": wrapper_path, "policy": policy_path, "runtime_dir": runtime_dir, "generated_policy": str(generated_policy), "dry_run": True})
-        for command in commands:
-            rc = run_json(command)
-            if rc != 0:
-                return rc
-        return emit({"kind": "install-wrapper", "host": args.host, "wrapper": wrapper_path, "policy": policy_path, "runtime_dir": runtime_dir, "generated_policy": str(generated_policy), "installed": True})
+            return emit({"kind": "install-wrapper-plan", "host": args.host, "commands": commands, "wrapper": wrapper_path, "policy": policy_path, "runtime_dir": runtime_dir, "backup_id": backup_id, "backup_dir": str(Path(paths["backup_root"]) / backup_id), "audit_log": str(install_audit_log()), "generated_policy": str(generated_policy), "candidate": str(candidate_archive), "candidate_manifest_sha": candidate_manifest["sha256"], "dry_run": True})
+        append_intent(None, intent_payload(operation_id=meta["operation_id"], run_id=meta["run_id"], host=meta["host"], action="install-wrapper", operation_kind="write", transport="ssh", command=["opsctl", "install-wrapper", "--host", args.host], details=details))
+        append_opsctl_audit(install_audit_log(), meta, "start", "started", details=details)
+        try:
+            backup_manifest = run_remote_json(host, remote_install_script("backup", remote_manifest_payload))
+            after_manifest = run_remote_json(host, remote_install_script("install", remote_manifest_payload), candidate_archive.read_bytes())
+        except Exception as exc:
+            append_opsctl_audit(install_audit_log(), meta, "result", "failed", reason_code="execution_failed", details=details, terminal=True)
+            raise GuardedOpsError(str(exc)) from exc
+        result_details = install_audit_details(paths, backup_id, candidate_manifest_sha=candidate_manifest["sha256"], backup_manifest_sha=backup_manifest.get("sha256"), before_sha=manifest_sha(backup_manifest.get("before", {})), after_sha=after_manifest.get("sha256"))
+        append_opsctl_audit(install_audit_log(), meta, "result", "success", details=result_details, terminal=True)
+        return emit({"kind": "install-wrapper", "host": args.host, "wrapper": wrapper_path, "policy": policy_path, "runtime_dir": runtime_dir, "generated_policy": str(generated_policy), "candidate_manifest_sha": candidate_manifest["sha256"], "backup_manifest_sha": backup_manifest.get("sha256"), "before_sha": manifest_sha(backup_manifest.get("before", {})), "after_sha": after_manifest.get("sha256"), "installed": True})
     wrapper_target = Path(host["server_wrapper"])
     policy_target = Path(host["policy_path"])
     runtime_target = policy_target.parent / "src" / "guarded_ops"
     if args.dry_run:
-        return emit({"kind": "install-wrapper-plan", "host": args.host, "wrapper": str(wrapper_target), "policy": str(policy_target), "dry_run": True})
-    wrapper_target.parent.mkdir(parents=True, exist_ok=True)
-    policy_target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(args.wrapper_source, wrapper_target)
-    shutil.copy2(generated_policy, policy_target)
-    if runtime_target.exists():
-        shutil.rmtree(runtime_target)
-    shutil.copytree(runtime_source, runtime_target)
-    return emit({"kind": "install-wrapper", "host": args.host, "wrapper": str(wrapper_target), "policy": str(policy_target), "runtime_dir": str(runtime_target.parent), "generated_policy": str(generated_policy), "installed": True})
+        return emit({"kind": "install-wrapper-plan", "host": args.host, "wrapper": str(wrapper_target), "policy": str(policy_target), "runtime_dir": str(runtime_target.parent), "backup_id": backup_id, "backup_dir": str(Path(paths["backup_root"]) / backup_id), "audit_log": str(install_audit_log()), "candidate_manifest_sha": candidate_manifest["sha256"], "dry_run": True})
+    append_intent(None, intent_payload(operation_id=meta["operation_id"], run_id=meta["run_id"], host=meta["host"], action="install-wrapper", operation_kind="write", transport="local", command=["opsctl", "install-wrapper", "--host", args.host], details=details))
+    append_opsctl_audit(install_audit_log(), meta, "start", "started", details=details)
+    try:
+        backup_manifest = local_backup_manifest(paths, backup_id)
+        wrapper_target.parent.mkdir(parents=True, exist_ok=True)
+        policy_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(args.wrapper_source, wrapper_target)
+        shutil.copy2(generated_policy, policy_target)
+        if runtime_target.exists():
+            shutil.rmtree(runtime_target)
+        shutil.copytree(runtime_source, runtime_target)
+        after_manifest = install_after_manifest(paths)
+    except Exception as exc:
+        append_opsctl_audit(install_audit_log(), meta, "result", "failed", reason_code="execution_failed", details=details, terminal=True)
+        raise GuardedOpsError(str(exc)) from exc
+    result_details = install_audit_details(paths, backup_id, candidate_manifest_sha=candidate_manifest["sha256"], backup_manifest_sha=backup_manifest.get("sha256"), before_sha=manifest_sha(backup_manifest["before"]), after_sha=manifest_sha(after_manifest))
+    append_opsctl_audit(install_audit_log(), meta, "result", "success", details=result_details, terminal=True)
+    return emit({"kind": "install-wrapper", "host": args.host, "wrapper": str(wrapper_target), "policy": str(policy_target), "runtime_dir": str(runtime_target.parent), "generated_policy": str(generated_policy), "candidate_manifest_sha": candidate_manifest["sha256"], "backup_manifest_sha": backup_manifest.get("sha256"), "before_sha": manifest_sha(backup_manifest["before"]), "after_sha": manifest_sha(after_manifest), "installed": True})
 
 
 def cmd_init_ssh_demo(args: argparse.Namespace) -> int:
@@ -680,6 +944,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["install-wrapper"].add_argument("--policy-source", default="server/policy.example.json")
     sub.choices["install-wrapper"].add_argument("--runtime-source", default="src/guarded_ops")
     sub.choices["install-wrapper"].add_argument("--target-dir")
+    sub.choices["install-wrapper"].add_argument("--operation-id")
+    sub.choices["install-wrapper"].add_argument("--run-id")
     sub.choices["init-ssh-demo"].add_argument("--reset", action="store_true")
     sub.choices["rollback"].add_argument("--host", required=True)
     sub.choices["rollback"].add_argument("--rollback-id", required=True)

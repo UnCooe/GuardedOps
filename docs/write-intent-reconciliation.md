@@ -12,9 +12,10 @@ sources.
 
 ### `guardedops.intent/v1`
 
-`opsctl` records a write intent before a supported wrapper-managed write is
+`opsctl` records a write intent before a supported controlled write is
 transported or applied. This version covers `apply-config-batch`, `deploy-ref`,
-`restart-service`, and `safe-git` fetch/checkout.
+`restart-service`, `safe-git` fetch/checkout, and the maintenance
+`install-wrapper` path.
 The intent carries the exact `operation_id` that `ops-wrapper` must reuse in
 `guardedops.audit/v1` records for the same operation.
 
@@ -73,10 +74,16 @@ with `source=external-ssh` says what the caller declares; by itself it does not
 prove source authenticity, host file integrity, or that every external channel
 was observed.
 
-Local legacy writes, wrapper installation/bootstrap, rollback-record maintenance,
-and writes made outside those four wrapper actions are not silently counted as
-intent-ledger coverage. They remain out of scope until supplied as explicit
-external evidence or instrumented in a later milestone.
+Local legacy writes, bootstrap, rollback-record maintenance, and writes made
+outside those controlled actions are not silently counted as intent-ledger
+coverage. They remain out of scope until supplied as explicit external evidence
+or instrumented in a later milestone.
+
+`install-wrapper` is treated as a controlled maintenance write. `opsctl` writes
+intent plus local start/result audit before and after SSH transport, records
+the declared wrapper/policy/runtime paths, creates a backup manifest under the
+policy `backup_dir`, and records candidate/backup/before/after hashes. It does
+not prove that an unrelated remote actor could not edit the same files.
 
 ## CLI
 

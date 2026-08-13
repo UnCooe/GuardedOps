@@ -27,6 +27,7 @@ INTENT_FIELDS = {
 DETAIL_ALLOWLIST = {
     "apply-config-batch": {"change_id", "file"},
     "deploy-ref": {"ref"},
+    "install-wrapper": {"backup_id", "policy", "runtime_dir", "wrapper"},
     "restart-service": {"service"},
     "safe-git": {"op", "remote", "ref"},
 }

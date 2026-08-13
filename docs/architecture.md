@@ -17,7 +17,8 @@ The audit and reconciliation layer is shared across these entrypoints:
 
 - `guardedops.intent/v1` records a write intent before `opsctl` runs a supported
   wrapper-managed write (`apply-config-batch`, `deploy-ref`, `restart-service`,
-  or `safe-git` fetch/checkout). The intent uses the exact `operation_id` that the remote wrapper must
+  or `safe-git` fetch/checkout) or the controlled `install-wrapper`
+  maintenance write. The intent uses the exact `operation_id` that the remote wrapper must
   reuse.
 - `guardedops.audit/v1` records wrapper start/result events for that same
   operation ID.

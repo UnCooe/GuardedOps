@@ -393,6 +393,11 @@ class OpsctlTests(unittest.TestCase):
 
     def test_install_wrapper_local_copies_wrapper_and_policy(self) -> None:
         target = self.tmp / "demo-install"
+        backup_root = self.tmp / "install-backups"
+        policy_source = self.tmp / "install-policy.json"
+        policy_data = json.loads((self.tmp / "examples/demo-remote/policy.json").read_text(encoding="utf-8"))
+        policy_data["backup_dir"] = str(backup_root)
+        policy_source.write_text(json.dumps(policy_data), encoding="utf-8")
         fleet = {
             "hosts": {
                 "install-demo": {
@@ -403,6 +408,7 @@ class OpsctlTests(unittest.TestCase):
                     "service": "guardedops-demo",
                     "server_wrapper": str(target / "ops-wrapper-demo"),
                     "policy_path": str(target / "policy.json"),
+                    "policy_source": str(policy_source),
                     "config_files": {
                         "config/app.env": {"allowed_keys": ["APP_LOG_LEVEL"]}
                     },
@@ -421,17 +427,32 @@ class OpsctlTests(unittest.TestCase):
                 "install-wrapper",
                 "--host",
                 "install-demo",
+                "--operation-id",
+                "op-install-local-001",
+                "--run-id",
+                "run-install-local-001",
                 "--wrapper-source",
                 "server/ops-wrapper",
-                "--policy-source",
-                "examples/demo-remote/policy.json",
             ],
             cwd=self.tmp,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        backup_manifest = json.loads((backup_root / "run-install-local-001-op-install-local-001" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["backup_manifest_sha"], backup_manifest["sha256"])
         self.assertTrue((target / "ops-wrapper-demo").exists())
         self.assertTrue((target / "policy.json").exists())
         self.assertTrue((target / "src/guarded_ops/wrapper.py").exists())
+        intent = [json.loads(line) for line in (self.tmp / ".guarded_ops/intent.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(intent[0]["operation_id"], "op-install-local-001")
+        self.assertEqual(intent[0]["action"], "install-wrapper")
+        self.assertEqual(intent[0]["details"]["wrapper"], str(target / "ops-wrapper-demo"))
+        self.assertNotIn("approval", json.dumps(intent[0]).lower())
+        audit = [json.loads(line) for line in (self.tmp / ".guarded_ops/install/audit.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([record["phase"] for record in audit], ["start", "result"])
+        self.assertEqual([record["operation_id"] for record in audit], ["op-install-local-001", "op-install-local-001"])
+        self.assertEqual(audit[-1]["details"]["backup_manifest_sha"], payload["backup_manifest_sha"])
+        self.assertEqual(audit[-1]["details"]["candidate_manifest_sha"], payload["candidate_manifest_sha"])
 
     def test_install_wrapper_ssh_plan_targets_configured_paths(self) -> None:
         result = run_cli(
@@ -455,6 +476,10 @@ class OpsctlTests(unittest.TestCase):
         self.assertNotIn("mkdir\", \"-p\", \"/usr/local/bin", rendered)
         self.assertIn("/etc/guardedops-demo/policy.json", rendered)
         self.assertIn("/etc/guardedops-demo/src", rendered)
+        self.assertIn("backup_id", payload)
+        self.assertIn("candidate_manifest_sha", payload)
+        self.assertIn(".guarded_ops/install/audit.jsonl", payload["audit_log"])
+        self.assertFalse((self.tmp / ".guarded_ops/intent.jsonl").exists())
         generated = json.loads((self.tmp / payload["generated_policy"]).read_text(encoding="utf-8"))
         self.assertEqual(generated["host"], "demo-ssh")
         self.assertEqual(generated["app_path"], "/opt/guardedops-demo/app")
