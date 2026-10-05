@@ -154,9 +154,11 @@ def _matches_anomaly_filters(data: dict[str, Any], filters: AuditFilters, since:
     keep it in the selected evidence set so a missing identifier cannot make a
     report appear complete.
     """
-    if filters.host and data.get("host") is not None and data.get("host") != filters.host:
+    host = data.get("host")
+    run_id = data.get("run_id")
+    if filters.host and isinstance(host, str) and host and host != filters.host:
         return False
-    if filters.run_id and data.get("run_id") is not None and data.get("run_id") != filters.run_id:
+    if filters.run_id and isinstance(run_id, str) and run_id and run_id != filters.run_id:
         return False
     if since:
         record_time = _record_timestamp(data)

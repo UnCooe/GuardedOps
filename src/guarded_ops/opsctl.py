@@ -68,6 +68,11 @@ def stable_id(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def config_change_id(payload: dict[str, Any]) -> str:
+    material = {key: payload[key] for key in ("kind", "host", "file", "key", "value", "created_at")}
+    return stable_id(material)
+
+
 def emit(payload: dict[str, Any]) -> int:
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
@@ -543,6 +548,11 @@ def batch_change_payload(host_key: str, file_name: str, sets: list[dict[str, Any
     }
 
 
+def batch_change_id(payload: dict[str, Any]) -> str:
+    material = {"file": payload["file"], "sets": payload["sets"], "deletes": payload["deletes"]}
+    return stable_id(material)
+
+
 def batch_args(payload: dict[str, Any]) -> list[str]:
     rendered = ["--file", payload["file"]]
     for item in payload["sets"]:
@@ -641,7 +651,7 @@ def cmd_plan_config(args: argparse.Namespace) -> int:
         "value": value,
         "created_at": utc_now(),
     }
-    change_id = stable_id(payload)
+    change_id = config_change_id(payload)
     payload["change_id"] = change_id
     display = {**payload, "value": redact_value(key, value)}
     display.update(
@@ -667,6 +677,12 @@ def cmd_apply_config(args: argparse.Namespace) -> int:
     if not change_path.exists():
         raise GuardedOpsError(f"unknown change_id: {args.change_id}")
     payload = json.loads(change_path.read_text(encoding="utf-8"))
+    try:
+        computed_change_id = config_change_id(payload)
+    except (KeyError, TypeError) as exc:
+        raise GuardedOpsError("config change payload is malformed") from exc
+    if payload.get("change_id") != computed_change_id or args.change_id != computed_change_id:
+        raise GuardedOpsError("config change payload does not match change_id")
     requested_host = getattr(args, "host", None)
     if requested_host and requested_host != payload["host"]:
         raise GuardedOpsError(f"change_id belongs to host {payload['host']}, not {requested_host}")
@@ -864,6 +880,12 @@ def cmd_apply_config_batch(args: argparse.Namespace) -> int:
     if not change_path.exists():
         raise GuardedOpsError(f"unknown change_id: {args.change_id}")
     payload = json.loads(change_path.read_text(encoding="utf-8"))
+    try:
+        computed_change_id = batch_change_id(payload)
+    except (KeyError, TypeError) as exc:
+        raise GuardedOpsError("config batch payload is malformed") from exc
+    if payload.get("change_id") != computed_change_id or args.change_id != computed_change_id:
+        raise GuardedOpsError("config batch payload does not match change_id")
     requested_host = getattr(args, "host", None)
     if requested_host and requested_host != payload["host"]:
         raise GuardedOpsError(f"change_id belongs to host {payload['host']}, not {requested_host}")

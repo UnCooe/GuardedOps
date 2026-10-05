@@ -12,6 +12,7 @@ from typing import Any
 
 from guarded_ops.intent import sanitize_command
 from guarded_ops.hook_policy import decide_command, hook_block_evidence, protected_command_destination
+from guarded_ops.opsctl import batch_change_id
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -415,16 +416,17 @@ class ReconciliationSecurityTests(unittest.TestCase):
             "file": "config/app.json",
             "sets": [{"path": "feature.enabled", "value": True}],
             "deletes": [],
-            "change_id": "change-security-001",
+            "change_id": "placeholder",
             "created_at": "2026-08-12T00:00:00Z",
         }
+        change_payload["change_id"] = batch_change_id(change_payload)
         changes = self.tmp / ".guarded_ops" / "changes"
         changes.mkdir(parents=True)
         (changes / f"{change_payload['change_id']}.json").write_text(
             json.dumps(change_payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        approval = "host=demo-ssh-test action=apply-config-batch change_id=change-security-001"
+        approval = f"host=demo-ssh-test action=apply-config-batch change_id={change_payload['change_id']}"
         intent_log = self.tmp / ".guarded_ops" / "intent.jsonl"
 
         result = run_cli(

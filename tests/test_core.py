@@ -178,6 +178,42 @@ class OpsctlTests(unittest.TestCase):
         self.assertNotEqual(replay.returncode, 0)
         self.assertIn("already been consumed", replay.stderr)
 
+    def test_apply_rejects_mutated_single_and_batch_change_payloads(self) -> None:
+        single = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "plan-config", "--host", "staging", "--file", "config/app.env", "--set", "APP_LOG_LEVEL=debug"],
+            cwd=self.tmp,
+        )
+        self.assertEqual(single.returncode, 0, single.stderr)
+        single_payload = json.loads(single.stdout)
+        single_path = self.tmp / ".guarded_ops" / "changes" / f"{single_payload['change_id']}.json"
+        mutated_single = json.loads(single_path.read_text(encoding="utf-8"))
+        mutated_single["value"] = "production"
+        single_path.write_text(json.dumps(mutated_single, sort_keys=True) + "\n", encoding="utf-8")
+        single_apply = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "apply-config", "--change-id", single_payload["change_id"], "--approval-token", single_payload["approval"]],
+            cwd=self.tmp,
+        )
+        self.assertNotEqual(single_apply.returncode, 0)
+        self.assertIn("does not match change_id", single_apply.stderr)
+        self.assertNotIn("APP_LOG_LEVEL=production", (self.tmp / "examples/mock-app/config/app.env").read_text(encoding="utf-8"))
+
+        batch = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "plan-config-batch", "--host", "staging", "--file", "config/app.env", "--set", "APP_LOG_LEVEL=debug"],
+            cwd=self.tmp,
+        )
+        self.assertEqual(batch.returncode, 0, batch.stderr)
+        batch_payload = json.loads(batch.stdout)
+        batch_path = self.tmp / ".guarded_ops" / "changes" / f"{batch_payload['change_id']}.json"
+        mutated_batch = json.loads(batch_path.read_text(encoding="utf-8"))
+        mutated_batch["sets"][0]["value"] = "production"
+        batch_path.write_text(json.dumps(mutated_batch, sort_keys=True) + "\n", encoding="utf-8")
+        batch_apply = run_cli(
+            [PYTHON, "-m", "guarded_ops.opsctl", "apply-config-batch", "--host", "staging", "--change-id", batch_payload["change_id"], "--approval-token", batch_payload["approval"]],
+            cwd=self.tmp,
+        )
+        self.assertNotEqual(batch_apply.returncode, 0)
+        self.assertIn("does not match change_id", batch_apply.stderr)
+
     def test_plan_config_dry_run_has_no_side_effect(self) -> None:
         dry_plan = run_cli(
             [
