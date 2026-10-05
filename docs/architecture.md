@@ -13,8 +13,44 @@ GuardedOps has five cooperating parts:
 - `ops-review` reads explicitly provided synthetic session files and reports
   operational patterns without exposing raw sensitive command text.
 
+`opsctl status` reports fleet metadata and local path existence. Remote health
+and audit checks use `observe`, `baseline`, `logs`, and `audit-status`. The
+wrapper-managed remote configuration write is `apply-config-batch`; the
+single-key `apply-config` path remains a local compatibility helper.
+
+The audit and reconciliation layer is shared across these entrypoints:
+
+- `guardedops.intent/v1` records a write intent before `opsctl` runs a supported
+  wrapper-managed write (`apply-config-batch`, `deploy-ref`, `restart-service`,
+  or `safe-git` fetch/checkout) or the controlled `install-wrapper`
+  maintenance write. The intent uses the exact `operation_id` that the remote wrapper must
+  reuse.
+- `guardedops.audit/v1` records wrapper start/result events for that same
+  operation ID.
+- `guardedops.evidence/v1` allows explicit hook block or declared external
+  write evidence to be included in offline reconciliation.
+- `ops-review audit-reconcile` evaluates the declared input files.
+- `ops-review daily-evidence` renders a reconciliation JSON report into daily
+  JSON and Markdown artifacts.
+
+Approval records are local, plan-bound authorization evidence. `opsctl` creates
+an approval record with a plan hash and short expiry; the optional user-prompt
+hook records a hashed user-turn receipt; `opsctl approve-plan` binds the receipt
+to the frozen plan; and a write consumes the approval record once. The flow
+does not identify the user or replace an external authorization system.
+
+Reconciliation uses exact operation IDs, not fuzzy host/action/run matching.
+Its known write denominator is the union of write intents, wrapper write audit
+operations, hook blocks, and declared external write evidence. Zero known writes
+means insufficient exposure. Missing sources are insufficient. Gaps, duplicate
+operation IDs, malformed records, legacy records, or metadata conflicts produce
+a partial result.
+
 The public examples are local and synthetic so tests can run without SSH,
 Clash, Mihomo, cloud credentials, or real production hosts.
+
+The JSON reconciliation report is the authoritative artifact. Markdown daily
+evidence is a safe summary render only.
 
 GuardedOps v0.1 is intentionally a repo-checkout alpha. The wheel verifies the
 Python CLI entrypoints, but example policies, wrapper scripts, docs, and

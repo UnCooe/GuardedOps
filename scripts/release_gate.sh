@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 python -m unittest discover -s tests
 rm -rf .guarded_ops build dist src/guardedops.egg-info
 scripts/leak_scan.sh --public .
@@ -27,9 +29,9 @@ PY
 scripts/leak_scan.sh --public dist
 scripts/leak_scan.sh --public "${artifact_dir}"
 help_dir="$(mktemp -d)"
-for cmd in "opsctl --help" "routectl --help" "ops-review --help" "ops-guard-hook --help"; do
-  safe_name="${cmd%% *}"
-  $cmd >"${help_dir}/${safe_name}.txt"
-done
+python -m guarded_ops.opsctl --help >"${help_dir}/opsctl.txt"
+python -m guarded_ops.route --help >"${help_dir}/routectl.txt"
+python -m guarded_ops.review --help >"${help_dir}/ops-review.txt"
+python -m guarded_ops.cli.ops_guard_hook --help >"${help_dir}/ops-guard-hook.txt"
 scripts/leak_scan.sh --public "${help_dir}"
 echo "release gate passed"

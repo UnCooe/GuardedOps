@@ -1,0 +1,8 @@
+{
+  "feature": {
+    "enabled": false
+  },
+  "limits": {
+    "timeout_ms": 1000
+  }
+}
