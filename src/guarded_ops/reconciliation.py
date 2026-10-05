@@ -146,6 +146,25 @@ def _matches_filters(data: dict[str, Any], filters: AuditFilters, since: datetim
     return True
 
 
+def _matches_anomaly_filters(data: dict[str, Any], filters: AuditFilters, since: datetime | None) -> bool:
+    """Select quality anomalies without hiding records lacking scope metadata.
+
+    A malformed or legacy record can still be scoped out when it carries an
+    explicit, different host/run/timestamp.  If it omits one of those fields,
+    keep it in the selected evidence set so a missing identifier cannot make a
+    report appear complete.
+    """
+    if filters.host and data.get("host") is not None and data.get("host") != filters.host:
+        return False
+    if filters.run_id and data.get("run_id") is not None and data.get("run_id") != filters.run_id:
+        return False
+    if since:
+        record_time = _record_timestamp(data)
+        if record_time is not None and record_time < since:
+            return False
+    return True
+
+
 def _render_command_template(command: Any) -> str | None:
     if command is None:
         return None
@@ -289,6 +308,8 @@ def _parse_intents(
     known_reads_excluded = 0
     for record in records:
         data = record.data
+        if not _matches_anomaly_filters(data, filters, since):
+            continue
         if data.get("schema_version") != INTENT_SCHEMA_VERSION:
             record_counts["intent_unknown"] += 1
             reasons.add("unknown_intent_schema")
@@ -317,6 +338,8 @@ def _parse_evidence(
     evidence: dict[str, list[EvidenceOperation]] = defaultdict(list)
     for record in records:
         data = record.data
+        if not _matches_anomaly_filters(data, filters, since):
+            continue
         if data.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
             record_counts["evidence_unknown"] += 1
             reasons.add("unknown_evidence_schema")
@@ -354,6 +377,8 @@ def _parse_audit(
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         data = record.data
+        if not _matches_anomaly_filters(data, filters, since):
+            continue
         if data.get("schema_version") == AUDIT_SCHEMA_VERSION and data.get("operation_kind") == "read":
             if _matches_filters(data, filters, since):
                 record_counts["audit_records"] += 1

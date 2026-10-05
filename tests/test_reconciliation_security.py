@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from guarded_ops.intent import sanitize_command
+from guarded_ops.hook_policy import decide_command, hook_block_evidence, protected_command_destination
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -214,6 +215,39 @@ class ReconciliationSecurityTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["hook_blocked"], 1)
         self.assertEqual(payload["coverage"]["explained_writes"], 1)
         self.assertEqual(payload["coverage"]["known_write_coverage_ratio"], 1.0)
+
+    def test_composed_hook_evidence_keeps_destination_and_matches_intent(self) -> None:
+        operation_id = "op-hook-composed-001"
+        command = "date ; ssh example-prod-us -- git -C /opt/project/aiserver reset --hard origin/pre"
+        decision = decide_command(command, ROOT / "examples/fleet.example.json")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            protected_command_destination(command, ROOT / "examples/fleet.example.json"),
+            "example-prod-us",
+        )
+
+        write_jsonl(self.intent, [intent_event(operation_id) | {"host": "example-prod-us"}])
+        write_jsonl(self.audit, [])
+        write_jsonl(
+            self.evidence,
+            [
+                hook_block_evidence(
+                    command,
+                    decision,
+                    operation_id=operation_id,
+                    run_id="run-security",
+                    host="example-prod-us",
+                )
+            ],
+        )
+
+        result = run_reconcile(self.intent, self.audit, evidence=self.evidence, cwd=self.tmp)
+
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        payload = load_stdout_json(result)
+        self.assertEqual(payload["counts"]["metadata_conflict"], 0)
+        self.assertEqual(payload["coverage"]["explained_writes"], 1)
+        self.assertIn("hook_blocked", payload["reasons"])
 
     def test_matching_operation_id_with_metadata_conflict_is_not_explained(self) -> None:
         write_jsonl(self.intent, [intent_event("op-metadata-conflict-001")])

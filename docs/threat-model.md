@@ -6,6 +6,8 @@ open-ended shell access with planned, policy-checked entrypoints.
 ## In Scope
 
 - Accidental raw SSH to protected hosts.
+- Limited diagnostic probes to protected hosts; arbitrary raw file and log reads
+  remain blocked and must use a guarded entrypoint.
 - Config changes that bypass allowlisted keys.
 - Deploys that do not name an exact revision.
 - Remote wrapper actions that read outside allowed roots.
@@ -18,13 +20,14 @@ open-ended shell access with planned, policy-checked entrypoints.
 ## Out of Scope
 
 - Secrets management.
-- A complete production authorization system. v0.1 approval tokens are
-  illustrative exact-match tokens, not expiring credentials.
+- A complete production authorization system. Approval records are local
+  plan-bound evidence with a short expiry and one-time consumption; they are
+  not expiring credentials or an external identity system.
 - Cloud account discovery.
 - Privilege escalation outside the configured wrapper.
 - Protection against a malicious repository maintainer.
 - Real network validation in the public examples.
-- Current-turn authorization.
+- Identity or authenticity of the user-turn reference supplied to the hook.
 - Real rollback correctness.
 - Root or direct SSH bypass prevention when it avoids the configured wrapper
   and declared evidence sources.

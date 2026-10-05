@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from guarded_ops.approval import Approval, ApprovalError, validate_approval
+from guarded_ops.approval import Approval, ApprovalError, approve_plan_from_user_turn, validate_approval
 from guarded_ops.config_patch import parse_set_expr
 from guarded_ops.fleet import host_config, load_fleet
 from guarded_ops.hook_policy import decide_command
@@ -35,6 +35,42 @@ class ApprovalFleetTests(unittest.TestCase):
             Approval.parse("host=staging action=deploy ref=abcdef0 extra=1").require({"host": "staging", "action": "deploy", "ref": "abcdef0"})
         with self.assertRaisesRegex(ApprovalError, "duplicate key"):
             Approval.parse("host=staging action=deploy ref=bad ref=abcdef0")
+
+    def test_approval_id_is_single_use_and_scope_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(ROOT / "examples", Path(tmp) / "examples")
+            scope = {"host": "staging", "action": "deploy", "ref": "abcdef0"}
+            plan = run_cli(
+                [PYTHON, "-m", "guarded_ops.opsctl", "--fleet", "examples/fleet.example.json", "plan-deploy", "--host", "staging", "--ref", "abcdef0"],
+                cwd=Path(tmp),
+            )
+            self.assertEqual(plan.returncode, 0, plan.stderr)
+            payload = json.loads(plan.stdout)
+            self.assertIn("approval_id", payload)
+            self.assertIn("plan_sha256", payload)
+            from guarded_ops.approval import consume_approval_record
+
+            approve_plan_from_user_turn(
+                payload["approval_id"],
+                "按刚才展示的计划执行",
+                user_turn_id="turn-core-single-use",
+                state_root=Path(tmp) / ".guarded_ops",
+            )
+            consume_approval_record(
+                payload["approval_id"],
+                scope,
+                state_root=Path(tmp) / ".guarded_ops",
+                operation_id=payload["operation_id"],
+                run_id=payload["run_id"],
+            )
+            with self.assertRaisesRegex(ApprovalError, "already been consumed"):
+                consume_approval_record(
+                    payload["approval_id"],
+                    scope,
+                    state_root=Path(tmp) / ".guarded_ops",
+                    operation_id=payload["operation_id"],
+                    run_id=payload["run_id"],
+                )
 
     def test_example_fleet_loads_and_unknown_host_fails(self) -> None:
         fleet = load_fleet(ROOT / "examples/fleet.example.json")
@@ -86,6 +122,61 @@ class OpsctlTests(unittest.TestCase):
         )
         self.assertEqual(apply_result.returncode, 0, apply_result.stderr)
         self.assertIn("APP_LOG_LEVEL=debug", (self.tmp / "examples/mock-app/config/app.env").read_text(encoding="utf-8"))
+
+    def test_apply_config_accepts_approval_id_from_frozen_plan(self) -> None:
+        plan = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "plan-config",
+                "--host",
+                "staging",
+                "--file",
+                "config/app.env",
+                "--set",
+                "APP_LOG_LEVEL=debug",
+            ],
+            cwd=self.tmp,
+        )
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        payload = json.loads(plan.stdout)
+        approve_plan_from_user_turn(
+            payload["approval_id"],
+            "可以，按这个计划执行",
+            user_turn_id="turn-core-apply-config",
+            state_root=self.tmp / ".guarded_ops",
+        )
+        apply_result = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "apply-config",
+                "--change-id",
+                payload["change_id"],
+                "--approval-id",
+                payload["approval_id"],
+            ],
+            cwd=self.tmp,
+        )
+        self.assertEqual(apply_result.returncode, 0, apply_result.stderr)
+        self.assertIn("APP_LOG_LEVEL=debug", (self.tmp / "examples/mock-app/config/app.env").read_text(encoding="utf-8"))
+        replay = run_cli(
+            [
+                PYTHON,
+                "-m",
+                "guarded_ops.opsctl",
+                "apply-config",
+                "--change-id",
+                payload["change_id"],
+                "--approval-id",
+                payload["approval_id"],
+            ],
+            cwd=self.tmp,
+        )
+        self.assertNotEqual(replay.returncode, 0)
+        self.assertIn("already been consumed", replay.stderr)
 
     def test_plan_config_dry_run_has_no_side_effect(self) -> None:
         dry_plan = run_cli(
@@ -277,6 +368,8 @@ class OpsctlTests(unittest.TestCase):
                 "--fleet",
                 "examples/fleet.example.json",
                 "apply-config-batch",
+                "--host",
+                "demo-local",
                 "--change-id",
                 plan_payload["change_id"],
                 "--approval-token",
@@ -788,23 +881,39 @@ class WrapperRouteReviewHookTests(unittest.TestCase):
         self.assertNotIn("ssh example-prod-us", json.dumps(events))
 
     def test_hook_blocks_raw_ssh_and_allows_guarded_entrypoint(self) -> None:
-        blocked = decide_command("ssh example-prod-us -- hostname", ROOT / "examples/fleet.example.json")
+        blocked = decide_command("ssh example-prod-us", ROOT / "examples/fleet.example.json")
         self.assertFalse(blocked.allowed)
         self.assertIn("blocked", blocked.reason)
         for command in (
-            "ssh -A example-prod-us -- hostname",
-            "ssh deploy-user@example-prod-us -- hostname",
             "sftp example-prod-us",
             "scp file.txt example-prod-us:/tmp/file.txt",
             "rsync file.txt example-prod-us:/tmp/file.txt",
-            "ssh 203.0.113.20 -- hostname",
-            "env ssh example-prod-us -- hostname",
-            "env -i PATH=/usr/bin ssh example-prod-us -- hostname",
-            "command ssh example-prod-us -- hostname",
-            "bash -lc 'ssh example-prod-us -- hostname'",
+            "ssh example-prod-us -- git -C /opt/project/aiserver fetch origin",
+            "ssh example-prod-us -- git -C /opt/project/aiserver reset --hard origin/pre",
+            "ssh example-prod-us -- supervisorctl restart aiserver",
+            "ssh 203.0.113.20 -- supervisorctl restart aiserver",
+            "env ssh example-prod-us -- git fetch origin",
+            "env -i PATH=/usr/bin ssh example-prod-us -- git pull origin pre",
+            "command ssh example-prod-us -- supervisorctl restart aiserver",
+            "bash -lc 'ssh example-prod-us -- git reset --hard origin/pre'",
         ):
             with self.subTest(command=command):
                 self.assertFalse(decide_command(command, ROOT / "examples/fleet.example.json").allowed)
+        for command in (
+            "ssh -A example-prod-us -- hostname",
+            "ssh deploy-user@example-prod-us -- hostname",
+            "ssh example-prod-us -- git -C /opt/project/aiserver status --short",
+            "ssh example-prod-us -- git -C /opt/project/aiserver rev-parse HEAD",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(decide_command(command, ROOT / "examples/fleet.example.json").allowed)
+        fleet = json.loads((ROOT / "examples/fleet.example.json").read_text(encoding="utf-8"))
+        fleet["hosts"]["pre"] = {**fleet["hosts"]["prod-us"], "ssh_alias": "aiserver-pre-codex"}
+        with tempfile.TemporaryDirectory() as tmp:
+            fleet_path = Path(tmp) / "fleet.json"
+            fleet_path.write_text(json.dumps(fleet), encoding="utf-8")
+            self.assertFalse(decide_command("ssh aiserver-pre -- git reset --hard origin/pre", fleet_path).allowed)
+            self.assertFalse(decide_command("ssh aiserver-pre-codex -- supervisorctl restart aiserver", fleet_path).allowed)
         allowed = decide_command("opsctl observe --host staging", ROOT / "examples/fleet.example.json")
         self.assertTrue(allowed.allowed)
 

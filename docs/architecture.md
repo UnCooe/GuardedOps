@@ -13,6 +13,11 @@ GuardedOps has five cooperating parts:
 - `ops-review` reads explicitly provided synthetic session files and reports
   operational patterns without exposing raw sensitive command text.
 
+`opsctl status` reports fleet metadata and local path existence. Remote health
+and audit checks use `observe`, `baseline`, `logs`, and `audit-status`. The
+wrapper-managed remote configuration write is `apply-config-batch`; the
+single-key `apply-config` path remains a local compatibility helper.
+
 The audit and reconciliation layer is shared across these entrypoints:
 
 - `guardedops.intent/v1` records a write intent before `opsctl` runs a supported
@@ -27,6 +32,12 @@ The audit and reconciliation layer is shared across these entrypoints:
 - `ops-review audit-reconcile` evaluates the declared input files.
 - `ops-review daily-evidence` renders a reconciliation JSON report into daily
   JSON and Markdown artifacts.
+
+Approval records are local, plan-bound authorization evidence. `opsctl` creates
+an approval record with a plan hash and short expiry; the optional user-prompt
+hook records a hashed user-turn receipt; `opsctl approve-plan` binds the receipt
+to the frozen plan; and a write consumes the approval record once. The flow
+does not identify the user or replace an external authorization system.
 
 Reconciliation uses exact operation IDs, not fuzzy host/action/run matching.
 Its known write denominator is the union of write intents, wrapper write audit

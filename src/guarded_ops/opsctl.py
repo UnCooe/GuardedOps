@@ -15,7 +15,16 @@ from typing import Any
 
 from . import __version__
 from .audit import append_event, default_run_id, event_payload, new_operation_id
-from .approval import approval_hint, validate_approval
+from .approval import (
+    approval_hint,
+    approval_record_metadata,
+    approve_plan_with_receipt,
+    consume_approval_record,
+    create_approval_record,
+    list_approval_records,
+    validate_approval,
+    verify_approval_record,
+)
 from .config_patch import parse_batch_set_expr, parse_set_expr, read_env, set_env_value, write_env
 from .errors import AuditWriteError, GuardedOpsError
 from .fleet import allowed_config_key, host_config, load_fleet, resolve_app_path
@@ -62,6 +71,97 @@ def stable_id(payload: dict[str, Any]) -> str:
 def emit(payload: dict[str, Any]) -> int:
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
+
+
+def approval_plan(
+    expected: dict[str, str],
+    *,
+    persist: bool = True,
+    operation_id: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    bound_operation_id = operation_id
+    bound_run_id = run_id
+    if persist:
+        bound_operation_id = bound_operation_id or new_operation_id(expected.get("action", "write"))
+        bound_run_id = bound_run_id or default_run_id()
+    if persist:
+        record = create_approval_record(expected, state_root=state_root(), operation_id=bound_operation_id, run_id=bound_run_id)
+    else:
+        from .approval import approval_id_for, plan_sha256
+
+        record = {"approval_id": approval_id_for(expected), "plan_sha256": plan_sha256(expected), "expires_at": None}
+    prompt = (
+        "Reply with a clear natural-language approval for this frozen plan, "
+        f"then run approve-plan for approval_id {record['approval_id']} using the recorded user-turn receipt."
+    )
+    return {
+        "approval": approval_hint(expected),
+        "approval_prompt": prompt,
+        "operation_id": bound_operation_id,
+        "run_id": bound_run_id,
+        **record,
+    }
+
+
+def validate_write_authorization(args: argparse.Namespace, expected: dict[str, str], *, consume: bool = True) -> None:
+    token = getattr(args, "approval_token", None)
+    approval_id = getattr(args, "approval_id", None)
+    if token and approval_id:
+        raise GuardedOpsError("use either --approval-token or --approval-id, not both")
+    try:
+        if approval_id:
+            metadata = approval_record_metadata(approval_id, state_root=state_root())
+            if getattr(args, "operation_id", None) is None and metadata.get("operation_id"):
+                setattr(args, "operation_id", metadata["operation_id"])
+            if getattr(args, "run_id", None) is None and metadata.get("run_id"):
+                setattr(args, "run_id", metadata["run_id"])
+            if consume:
+                consume_approval_record(
+                    approval_id,
+                    expected,
+                    state_root=state_root(),
+                    operation_id=getattr(args, "operation_id", None),
+                    run_id=getattr(args, "run_id", None),
+                )
+            else:
+                verify_approval_record(
+                    approval_id,
+                    expected,
+                    state_root=state_root(),
+                    operation_id=getattr(args, "operation_id", None),
+                    run_id=getattr(args, "run_id", None),
+                )
+            return
+        validate_approval(token, expected)
+    except Exception as exc:
+        if isinstance(exc, GuardedOpsError):
+            raise
+        raise GuardedOpsError(str(exc)) from exc
+
+
+def cmd_pending_approval(args: argparse.Namespace) -> int:
+    statuses = None
+    if args.status:
+        statuses = {args.status}
+    records = list_approval_records(state_root=state_root(), statuses=statuses)
+    if args.approval_id:
+        records = [item for item in records if item.get("approval_id") == args.approval_id]
+    return emit({"kind": "pending-approval", "count": len(records), "approvals": records})
+
+
+def cmd_approve_plan(args: argparse.Namespace) -> int:
+    if getattr(args, "message", None) is not None:
+        raise GuardedOpsError(
+            "approve-plan --message is unsupported; scope approval must use a recorded receipt/user-turn to avoid contradiction or mismatch"
+        )
+    receipt = approve_plan_with_receipt(
+        args.approval_id,
+        receipt_id=args.receipt_id,
+        user_turn_id=args.user_turn_id,
+        state_root=state_root(),
+    )
+    return emit({"kind": "approval-receipt", **receipt})
 
 
 def run_json(command: list[str], dry_run: bool = False) -> int:
@@ -544,7 +644,14 @@ def cmd_plan_config(args: argparse.Namespace) -> int:
     change_id = stable_id(payload)
     payload["change_id"] = change_id
     display = {**payload, "value": redact_value(key, value)}
-    display["approval"] = approval_hint({"host": args.host, "action": "apply-config", "change_id": change_id})
+    display.update(
+        approval_plan(
+            {"host": args.host, "action": "apply-config", "change_id": change_id},
+            persist=not args.dry_run,
+            operation_id=getattr(args, "operation_id", None),
+            run_id=getattr(args, "run_id", None),
+        )
+    )
     if args.dry_run:
         display["dry_run"] = True
         display["path"] = None
@@ -560,9 +667,13 @@ def cmd_apply_config(args: argparse.Namespace) -> int:
     if not change_path.exists():
         raise GuardedOpsError(f"unknown change_id: {args.change_id}")
     payload = json.loads(change_path.read_text(encoding="utf-8"))
-    validate_approval(
-        args.approval_token,
+    requested_host = getattr(args, "host", None)
+    if requested_host and requested_host != payload["host"]:
+        raise GuardedOpsError(f"change_id belongs to host {payload['host']}, not {requested_host}")
+    validate_write_authorization(
+        args,
         {"host": payload["host"], "action": "apply-config", "change_id": payload["change_id"]},
+        consume=not args.dry_run,
     )
     fleet = load_fleet(args.fleet)
     host = host_config(fleet, payload["host"])
@@ -581,6 +692,8 @@ def cmd_apply_config(args: argparse.Namespace) -> int:
                 "file": payload["file"],
                 "key": payload["key"],
                 "target": str(target),
+                "operation_id": getattr(args, "operation_id", None),
+                "run_id": getattr(args, "run_id", None),
                 "dry_run": True,
             }
         )
@@ -594,6 +707,8 @@ def cmd_apply_config(args: argparse.Namespace) -> int:
         "file": payload["file"],
         "key": payload["key"],
         "applied_at": utc_now(),
+        "operation_id": getattr(args, "operation_id", None),
+        "run_id": getattr(args, "run_id", None),
     }
     (records_dir() / f"config-{payload['change_id']}.json").write_text(
         json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -605,12 +720,18 @@ def cmd_plan_deploy(args: argparse.Namespace) -> int:
     _, host = common_host(args)
     if not SHA_RE.match(args.ref):
         raise GuardedOpsError("deploy ref must be an exact hex commit SHA, 7 to 64 characters")
+    scope = {"host": args.host, "action": "deploy", "ref": args.ref}
     payload = {
         "kind": "deploy-plan",
         "host": args.host,
         "service": host["service"],
         "ref": args.ref,
-        "approval": approval_hint({"host": args.host, "action": "deploy", "ref": args.ref}),
+        **approval_plan(
+            scope,
+            persist=not args.dry_run,
+            operation_id=getattr(args, "operation_id", None),
+            run_id=getattr(args, "run_id", None),
+        ),
     }
     return emit(payload)
 
@@ -619,19 +740,39 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     _, host = common_host(args)
     if not SHA_RE.match(args.ref):
         raise GuardedOpsError("deploy ref must be an exact hex commit SHA, 7 to 64 characters")
-    validate_approval(args.approval_token, {"host": args.host, "action": "deploy", "ref": args.ref})
+    expected = {"host": args.host, "action": "deploy", "ref": args.ref}
+    validate_write_authorization(args, expected, consume=not args.dry_run)
+    approval_token = args.approval_token or approval_hint(expected)
     if host.get("transport"):
         rendered = wrapper_write_intent(
             args,
             host,
             "deploy-ref",
-            ["--ref", args.ref, "--approval-token", args.approval_token],
+            ["--ref", args.ref, "--approval-token", approval_token],
             details={"host": args.host, "ref": args.ref},
         )
         return run_wrapper(args, host, "deploy-ref", rendered)
     if args.dry_run:
-        return emit({"kind": "deploy-apply-plan", "host": args.host, "service": host["service"], "ref": args.ref, "dry_run": True})
-    record = {"kind": "deploy-record", "host": args.host, "service": host["service"], "ref": args.ref, "deployed_at": utc_now()}
+        return emit(
+            {
+                "kind": "deploy-apply-plan",
+                "host": args.host,
+                "service": host["service"],
+                "ref": args.ref,
+                "operation_id": getattr(args, "operation_id", None),
+                "run_id": getattr(args, "run_id", None),
+                "dry_run": True,
+            }
+        )
+    record = {
+        "kind": "deploy-record",
+        "host": args.host,
+        "service": host["service"],
+        "ref": args.ref,
+        "deployed_at": utc_now(),
+        "operation_id": getattr(args, "operation_id", None),
+        "run_id": getattr(args, "run_id", None),
+    }
     record_id = stable_id(record)
     (records_dir() / f"deploy-{record_id}.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return emit({**record, "record_id": record_id})
@@ -652,13 +793,15 @@ def cmd_git(args: argparse.Namespace) -> int:
     op = args.op
     rendered = ["--op", op]
     if op == "fetch":
-        validate_approval(args.approval_token or "", {"host": args.host, "action": "safe-git-fetch", "remote": args.remote})
-        rendered.extend(["--remote", args.remote, "--approval-token", args.approval_token or ""])
+        expected = {"host": args.host, "action": "safe-git-fetch", "remote": args.remote}
+        validate_write_authorization(args, expected, consume=not args.dry_run)
+        rendered.extend(["--remote", args.remote, "--approval-token", args.approval_token or approval_hint(expected)])
     elif op == "checkout":
         if not args.ref or not SHA_RE.match(args.ref):
             raise GuardedOpsError("safe-git checkout requires an exact hex ref")
-        validate_approval(args.approval_token or "", {"host": args.host, "action": "safe-git-checkout", "ref": args.ref})
-        rendered.extend(["--ref", args.ref, "--approval-token", args.approval_token or ""])
+        expected = {"host": args.host, "action": "safe-git-checkout", "ref": args.ref}
+        validate_write_authorization(args, expected, consume=not args.dry_run)
+        rendered.extend(["--ref", args.ref, "--approval-token", args.approval_token or approval_hint(expected)])
     else:
         if args.ref:
             if not SAFE_REF_RE.match(args.ref) or ".." in args.ref or args.ref.startswith("-"):
@@ -684,12 +827,13 @@ def cmd_restart_service(args: argparse.Namespace) -> int:
     service = args.service or host["service"]
     if service != host["service"]:
         raise GuardedOpsError(f"service is not allowed for host {args.host}: {service}")
-    validate_approval(args.approval_token, {"host": args.host, "action": "restart-service", "service": service})
+    expected = {"host": args.host, "action": "restart-service", "service": service}
+    validate_write_authorization(args, expected, consume=not args.dry_run)
     rendered = wrapper_write_intent(
         args,
         host,
         "restart-service",
-        ["--service-name", service, "--approval-token", args.approval_token],
+        ["--service-name", service, "--approval-token", args.approval_token or approval_hint(expected)],
         details={"host": args.host, "service": service},
     )
     return run_wrapper(args, host, "restart-service", rendered)
@@ -712,7 +856,7 @@ def cmd_plan_config_batch(args: argparse.Namespace) -> int:
         (changes_dir() / f"{payload['change_id']}.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     display = redacted_batch_payload(payload)
     preview_cmd = wrapper_command(host, "plan-config-batch", append_run_id(args, batch_args(display)))
-    return emit({**display, "approval": approval_hint({"host": args.host, "action": "apply-config-batch", "change_id": payload["change_id"]}), "remote_command": preview_cmd, "path": None if args.dry_run else str(changes_dir() / f"{payload['change_id']}.json")})
+    return emit({**display, **approval_plan({"host": args.host, "action": "apply-config-batch", "change_id": payload["change_id"]}, persist=not args.dry_run, operation_id=getattr(args, "operation_id", None), run_id=getattr(args, "run_id", None)), "remote_command": preview_cmd, "path": None if args.dry_run else str(changes_dir() / f"{payload['change_id']}.json")})
 
 
 def cmd_apply_config_batch(args: argparse.Namespace) -> int:
@@ -720,7 +864,11 @@ def cmd_apply_config_batch(args: argparse.Namespace) -> int:
     if not change_path.exists():
         raise GuardedOpsError(f"unknown change_id: {args.change_id}")
     payload = json.loads(change_path.read_text(encoding="utf-8"))
-    validate_approval(args.approval_token, {"host": payload["host"], "action": "apply-config-batch", "change_id": payload["change_id"]})
+    requested_host = getattr(args, "host", None)
+    if requested_host and requested_host != payload["host"]:
+        raise GuardedOpsError(f"change_id belongs to host {payload['host']}, not {requested_host}")
+    expected = {"host": payload["host"], "action": "apply-config-batch", "change_id": payload["change_id"]}
+    validate_write_authorization(args, expected, consume=not args.dry_run)
     fleet = load_fleet(args.fleet)
     host = prepare_local_demo_host({**host_config(fleet, payload["host"]), "host": payload["host"]})
     for key in [item["path"] for item in payload["sets"]] + payload["deletes"]:
@@ -730,7 +878,7 @@ def cmd_apply_config_batch(args: argparse.Namespace) -> int:
         args,
         host,
         "apply-config-batch",
-        ["--change-id", payload["change_id"], "--approval-token", args.approval_token, *batch_args(payload)],
+        ["--change-id", payload["change_id"], "--approval-token", args.approval_token or approval_hint(expected), *batch_args(payload)],
         details={"host": payload["host"], "change_id": payload["change_id"], "file": payload["file"]},
     )
     return run_wrapper(args, host, "apply-config-batch", rendered)
@@ -873,10 +1021,32 @@ def cmd_init_ssh_demo(args: argparse.Namespace) -> int:
 
 
 def cmd_rollback(args: argparse.Namespace) -> int:
-    validate_approval(args.approval_token, {"host": args.host, "action": "rollback", "rollback_id": args.rollback_id})
+    validate_write_authorization(
+        args,
+        {"host": args.host, "action": "rollback", "rollback_id": args.rollback_id},
+        consume=not args.dry_run,
+    )
+    operation_id = getattr(args, "operation_id", None) or new_operation_id("rollback")
+    run_id = getattr(args, "run_id", None) or default_run_id()
     if args.dry_run:
-        return emit({"kind": "rollback-apply-plan", "host": args.host, "rollback_id": args.rollback_id, "dry_run": True})
-    record = {"kind": "rollback-record", "host": args.host, "rollback_id": args.rollback_id, "rolled_back_at": utc_now()}
+        return emit(
+            {
+                "kind": "rollback-apply-plan",
+                "host": args.host,
+                "rollback_id": args.rollback_id,
+                "operation_id": operation_id,
+                "run_id": run_id,
+                "dry_run": True,
+            }
+        )
+    record = {
+        "kind": "rollback-record",
+        "host": args.host,
+        "rollback_id": args.rollback_id,
+        "rolled_back_at": utc_now(),
+        "operation_id": operation_id,
+        "run_id": run_id,
+    }
     (records_dir() / f"rollback-{args.rollback_id}.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return emit(record)
 
@@ -887,7 +1057,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="validate and render the action without applying side effects")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    hostless_commands = {"apply-config", "apply-config-batch", "rollback", "init-demo"}
+    hostless_commands = {"apply-config", "apply-config-batch", "rollback", "init-demo", "pending-approval", "approve-plan"}
     for name, func in {
         "status": cmd_status,
         "init-demo": cmd_init_demo,
@@ -907,6 +1077,8 @@ def build_parser() -> argparse.ArgumentParser:
         "init-ssh-demo": cmd_init_ssh_demo,
         "rollback": cmd_rollback,
         "audit-status": cmd_audit_status,
+        "pending-approval": cmd_pending_approval,
+        "approve-plan": cmd_approve_plan,
     }.items():
         cmd = sub.add_parser(name)
         cmd.set_defaults(func=func)
@@ -919,26 +1091,40 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["logs"].add_argument("--lines", type=int, default=80)
     sub.choices["plan-config"].add_argument("--file", required=True)
     sub.choices["plan-config"].add_argument("--set", dest="set_expr", required=True)
+    sub.choices["plan-config"].add_argument("--operation-id")
+    sub.choices["plan-config"].add_argument("--run-id")
     sub.choices["apply-config"].add_argument("--change-id", required=True)
-    sub.choices["apply-config"].add_argument("--approval-token", required=True)
+    sub.choices["apply-config"].add_argument("--host")
+    sub.choices["apply-config"].add_argument("--approval-token")
+    sub.choices["apply-config"].add_argument("--approval-id")
+    sub.choices["apply-config"].add_argument("--operation-id")
+    sub.choices["apply-config"].add_argument("--run-id")
     sub.choices["git"].add_argument("--op", required=True, choices=["status", "rev-parse", "log", "fetch", "checkout"])
     sub.choices["git"].add_argument("--ref")
     sub.choices["git"].add_argument("--remote", default="origin")
     sub.choices["git"].add_argument("--limit", type=int, default=5)
     sub.choices["git"].add_argument("--approval-token")
+    sub.choices["git"].add_argument("--approval-id")
     sub.choices["git"].add_argument("--operation-id")
     sub.choices["plan-config-batch"].add_argument("--file", required=True)
     sub.choices["plan-config-batch"].add_argument("--set", dest="set_exprs", action="append", default=[])
     sub.choices["plan-config-batch"].add_argument("--delete", dest="deletes", action="append", default=[])
+    sub.choices["plan-config-batch"].add_argument("--operation-id")
     sub.choices["apply-config-batch"].add_argument("--change-id", required=True)
-    sub.choices["apply-config-batch"].add_argument("--approval-token", required=True)
+    sub.choices["apply-config-batch"].add_argument("--host")
+    sub.choices["apply-config-batch"].add_argument("--approval-token")
+    sub.choices["apply-config-batch"].add_argument("--approval-id")
     sub.choices["apply-config-batch"].add_argument("--operation-id")
     sub.choices["plan-deploy"].add_argument("--ref", required=True)
+    sub.choices["plan-deploy"].add_argument("--operation-id")
+    sub.choices["plan-deploy"].add_argument("--run-id")
     sub.choices["deploy"].add_argument("--ref", required=True)
-    sub.choices["deploy"].add_argument("--approval-token", required=True)
+    sub.choices["deploy"].add_argument("--approval-token")
+    sub.choices["deploy"].add_argument("--approval-id")
     sub.choices["deploy"].add_argument("--operation-id")
     sub.choices["restart-service"].add_argument("--service")
-    sub.choices["restart-service"].add_argument("--approval-token", required=True)
+    sub.choices["restart-service"].add_argument("--approval-token")
+    sub.choices["restart-service"].add_argument("--approval-id")
     sub.choices["restart-service"].add_argument("--operation-id")
     sub.choices["install-wrapper"].add_argument("--wrapper-source", default="server/ops-wrapper")
     sub.choices["install-wrapper"].add_argument("--policy-source", default="server/policy.example.json")
@@ -949,7 +1135,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.choices["init-ssh-demo"].add_argument("--reset", action="store_true")
     sub.choices["rollback"].add_argument("--host", required=True)
     sub.choices["rollback"].add_argument("--rollback-id", required=True)
-    sub.choices["rollback"].add_argument("--approval-token", required=True)
+    sub.choices["rollback"].add_argument("--approval-token")
+    sub.choices["rollback"].add_argument("--approval-id")
+    sub.choices["rollback"].add_argument("--operation-id")
+    sub.choices["rollback"].add_argument("--run-id")
+    sub.choices["pending-approval"].add_argument("--approval-id")
+    sub.choices["pending-approval"].add_argument("--status", choices=["pending", "approved", "consumed"])
+    sub.choices["approve-plan"].add_argument("--approval-id", required=True)
+    sub.choices["approve-plan"].add_argument("--receipt-id")
+    sub.choices["approve-plan"].add_argument("--user-turn-id")
+    sub.choices["approve-plan"].add_argument("--message")
     for name in ("observe", "logs", "baseline", "git", "plan-config-batch", "apply-config-batch", "deploy", "restart-service"):
         sub.choices[name].add_argument("--run-id")
     sub.choices["audit-status"].add_argument("--run-id")
